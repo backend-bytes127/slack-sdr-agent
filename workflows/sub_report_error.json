@@ -1,0 +1,199 @@
+{
+  "id": "sdrSubReportErr1",
+  "name": "SDR · sub · Report error",
+  "active": false,
+  "nodes": [
+    {
+      "id": "02242845-9c41-51cf-83db-bb97ae5fedde",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "workflow",
+              "type": "any"
+            },
+            {
+              "name": "step",
+              "type": "any"
+            },
+            {
+              "name": "lead_id",
+              "type": "any"
+            },
+            {
+              "name": "error",
+              "type": "any"
+            },
+            {
+              "name": "mark_lead",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "33aa2dcb-ce0f-51a6-99e7-2fefa26a76eb",
+      "name": "Log error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with e as (\n  insert into workflow_errors (workflow, step, lead_id, error, payload)\n  values ($1, $2, nullif($3, '')::uuid, $4, $5::jsonb) returning id\n),\nu as (\n  update leads set status = 'error'\n  where id = nullif($3, '')::uuid and $6::boolean and status not in ('do_not_contact')\n  returning id\n)\nselect (select id from e) as error_id, (select count(*) from u) as marked,\n       l.id, l.slack_channel_id, l.slack_thread_ts\nfrom (select 1) d left join leads l on l.id = nullif($3, '')::uuid",
+        "options": {
+          "queryReplacement": "={{ [$json.workflow ?? null, $json.step ?? null, String($json.lead_id ?? ''), String($json.error ?? ''), JSON.stringify({ step: $json.step }), String($json.mark_lead !== false && $json.mark_lead !== 'false')] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "41a09190-b6e1-5956-8853-66e27eb62562",
+      "name": "Build alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Build the \"Something failed\" Slack alert. Goes in the lead's thread (with Retry) when the\n// lead is known, otherwise to the main channel.\nconst input = $('Called by parent').first().json;\nconst row = $input.first().json;\nconst cut = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s);\n\nconst text = `:warning: Something failed at *${input.step || 'unknown step'}* (${input.workflow || 'workflow'})\\n` +\n  '```' + cut(String(input.error || 'no error message'), 1500) + '```';\n\nconst blocks = [{ type: 'section', text: { type: 'mrkdwn', text } }];\nif (row.id) {\n  blocks.push({ type: 'actions', elements: [\n    { type: 'button', action_id: 'retry_lead', style: 'primary', text: { type: 'plain_text', text: 'Retry' }, value: row.id },\n  ] });\n}\n\nconst payload = {\n  channel: row.slack_channel_id || $env.SLACK_CHANNEL_ID,\n  text: 'Something failed',\n  blocks,\n  unfurl_links: false,\n  unfurl_media: false,\n};\nif (row.slack_thread_ts) payload.thread_ts = row.slack_thread_ts;\n\nreturn [{ json: { payload } }];\n"
+      }
+    },
+    {
+      "id": "56c44fae-bb9c-58d0-a8da-c1dd7ead6e4a",
+      "name": "Alert in thread",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postMessage' }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "e70562a1-ae06-501b-9715-6f38868d0edd",
+      "name": "Return failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { ok: false } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Log error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log error": {
+      "main": [
+        [
+          {
+            "node": "Build alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build alert": {
+      "main": [
+        [
+          {
+            "node": "Alert in thread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert in thread": {
+      "main": [
+        [
+          {
+            "node": "Return failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {}
+}

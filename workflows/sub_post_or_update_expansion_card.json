@@ -1,0 +1,194 @@
+{
+  "id": "sdrSubExpCard001",
+  "name": "SDR · sub · Post or update expansion card",
+  "active": false,
+  "nodes": [
+    {
+      "id": "091924e8-c353-5c01-be17-ec14c0d44599",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "run_id",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "149fd0a3-2c4b-5906-8486-2aed258e675b",
+      "name": "Load run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select r.*,\n  coalesce((select json_agg(p order by p.fit_score desc nulls last, p.created_at)\n            from (select id, full_name, title, fit_score, fit_reason, work_email, email_status,\n                         linkedin_url, status, created_at\n                  from leads where expansion_run_id = r.id) p), '[]'::json) as people\nfrom expansion_runs r where r.id = $1::uuid",
+        "options": {
+          "queryReplacement": "={{ [$json.run_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "bc12b470-6764-52c0-95ed-38eba75fb6c9",
+      "name": "Build expansion card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// One expansion card per run: suggested colleagues ranked by fit, with Add as lead / Skip.\n// Re-rendered (chat.update) after every Add/Skip so decided people lose their buttons.\nconst run = $input.first().json;\nconst people = Array.isArray(run.people) ? run.people : [];\nconst company = run.company_name || run.company_domain || 'this company';\nconst MAX_PEOPLE = 8;\nconst cut = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s);\n\nconst blocks = [];\nif (people.length === 0) {\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `:mag: No other matching people found at *${company}*.` } });\n} else {\n  blocks.push({ type: 'header', text: { type: 'plain_text', text: cut(`Found ${people.length} more people at ${company}`, 150) } });\n  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: 'Ranked by persona fit. Nobody is contacted until you add and call them.' }] });\n  for (const p of people.slice(0, MAX_PEOPLE)) {\n    const email = p.work_email && ['valid', 'deliverable', 'verified'].includes(String(p.email_status).toLowerCase())\n      ? ':white_check_mark: valid email' : ':x: no valid email';\n    const score = p.fit_score ? `fit ${p.fit_score}/5` : 'fit n/a';\n    blocks.push({ type: 'divider' });\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: cut(\n      `*<${p.linkedin_url}|${p.full_name || p.linkedin_url}>* · ${p.title || 'title unknown'}\\n${score} · ${email}\\n_${p.fit_reason || 'No reason given'}_`, 2900) } });\n    if (p.status === 'suggested') {\n      blocks.push({ type: 'actions', elements: [\n        { type: 'button', action_id: 'add_suggested_lead', style: 'primary', text: { type: 'plain_text', text: 'Add as lead' }, value: p.id },\n        { type: 'button', action_id: 'skip_suggested_lead', text: { type: 'plain_text', text: 'Skip' }, value: p.id },\n      ] });\n    } else {\n      const label = p.status === 'skipped' ? ':heavy_minus_sign: Skipped' : `:arrow_right: Added as lead (\\`${p.status}\\`)`;\n      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: label }] });\n    }\n  }\n}\n\nconst payload = { channel: run.slack_channel_id, text: `Account expansion: ${company}`, blocks, unfurl_links: false };\nif (run.slack_message_ts) payload.ts = run.slack_message_ts;\nelse payload.thread_ts = run.slack_thread_ts;\n\nreturn [{ json: {\n  run_id: run.id,\n  people_count: people.length,\n  method: run.slack_message_ts ? 'chat.update' : 'chat.postMessage',\n  payload,\n} }];\n"
+      }
+    },
+    {
+      "id": "ec59af38-b122-5ac0-b705-3ac8b6dd6ece",
+      "name": "Send card",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ $json.method }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "b740cd31-9850-5680-88ec-f9971cd03a01",
+      "name": "Save card ts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate expansion_runs set slack_message_ts = coalesce(slack_message_ts, $2), status = case when $3::int = 0 then 'empty' else 'posted' end where id = $1::uuid returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Build expansion card').first().json.run_id, $json.ts ?? null, $('Build expansion card').first().json.people_count] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Load run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load run": {
+      "main": [
+        [
+          {
+            "node": "Build expansion card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build expansion card": {
+      "main": [
+        [
+          {
+            "node": "Send card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send card": {
+      "main": [
+        [
+          {
+            "node": "Save card ts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

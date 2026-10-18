@@ -1,0 +1,524 @@
+{
+  "id": "sdrWf4Errors0001",
+  "name": "SDR · WF4 Errors, sweeps & reporting",
+  "active": false,
+  "nodes": [
+    {
+      "id": "a403db9e-c1c7-5320-9773-afbc2198b34a",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "f1584518-dead-5b38-9d92-0a49e9c96ad3",
+      "name": "Log workflow error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into workflow_errors (workflow, step, error, payload) values ($1, $2, $3, $4::jsonb) returning id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$json.workflow?.name ?? null, $json.execution?.lastNodeExecuted ?? null, String($json.execution?.error?.message ?? 'unknown error').slice(0, 2000), JSON.stringify({ execution_id: $json.execution?.id ?? null, url: $json.execution?.url ?? null })] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "a2fec205-6812-5132-8653-71641c90e753",
+      "name": "Alert channel",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postMessage' }}",
+            "payload": "={{ ({ channel: $env.SLACK_CHANNEL_ID, text: ':rotating_light: Something failed in *' + $('Error Trigger').first().json.workflow.name + '* at *' + ($('Error Trigger').first().json.execution.lastNodeExecuted || 'unknown step') + '*: ' + String($('Error Trigger').first().json.execution.error?.message || '').slice(0, 500) }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "7ef703d1-eedd-5e59-9d80-5e978ddc3262",
+      "name": "Every 10 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        250
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "f009b07a-7fe2-50f0-981d-674126563f70",
+      "name": "Find stuck enrichments",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'error'\nwhere status = 'enriching' and status_changed_at < now() - interval '15 minutes'\nreturning id, full_name, linkedin_url\n) select * from _r",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "069dfe26-b73e-5492-94dc-2f509fcefad8",
+      "name": "Alert stuck lead",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        200
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubReportErr1",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "workflow": "={{ 'SDR · WF4 sweep' }}",
+            "step": "={{ 'Enrichment (no result after 15 min)' }}",
+            "lead_id": "={{ $json.id }}",
+            "error": "={{ 'Enrichment never finished for ' + ($json.full_name || $json.linkedin_url) }}",
+            "mark_lead": "={{ false }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "workflow",
+              "displayName": "workflow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mark_lead",
+              "displayName": "mark_lead",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "d9ad1fcb-a2d2-5250-8850-992049df0d5f",
+      "name": "Find stuck expansion runs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        350
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate expansion_runs set status = 'posting'\nwhere status = 'searching' and created_at < now() - interval '10 minutes'\nreturning id\n) select * from _r",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "bf5dbae9-d8b0-5c7f-bef3-ea78593cbae2",
+      "name": "Post partial expansion card",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        350
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubExpCard001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "35b790f9-8e40-502f-ab17-b20b47c051eb",
+      "name": "Daily at 18:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        550
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 18
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "05a893f7-1a68-57e1-98a7-0ff11ced9c7c",
+      "name": "Daily stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        550
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select * from v_daily_summary",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "9becaf7a-0e71-5885-af26-b73f4c201edd",
+      "name": "Post daily summary",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        550
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postMessage' }}",
+            "payload": "={{ ({ channel: $env.SLACK_CHANNEL_ID, text: ':bar_chart: *SDR Agent today*\\n' + '• New leads: ' + $json.new_leads + '\\n• Calls: ' + $json.calls + ' (connected ' + $json.connected + ')\\n' + '• No-answer leads sequenced: ' + $json.sequenced + '\\n• Colleagues added / skipped: ' + $json.colleagues_added + ' / ' + $json.colleagues_skipped + '\\n• Messages sent: ' + $json.messages_sent }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0428ad33-fec0-582e-a6d3-867610cc878e",
+      "name": "Nightly at 03:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        750
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "20c90c1f-6af1-5cc2-b90e-d5c8f9b543fb",
+      "name": "Delete old skipped suggestions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        750
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with gone as (\n  delete from leads\n  where status = 'skipped' and source = 'account_expansion' and updated_at < now() - interval '90 days'\n  returning id\n)\nselect count(*) as deleted from gone",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Log workflow error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log workflow error": {
+      "main": [
+        [
+          {
+            "node": "Alert channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 10 minutes": {
+      "main": [
+        [
+          {
+            "node": "Find stuck enrichments",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Find stuck expansion runs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find stuck enrichments": {
+      "main": [
+        [
+          {
+            "node": "Alert stuck lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find stuck expansion runs": {
+      "main": [
+        [
+          {
+            "node": "Post partial expansion card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily at 18:00": {
+      "main": [
+        [
+          {
+            "node": "Daily stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily stats": {
+      "main": [
+        [
+          {
+            "node": "Post daily summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nightly at 03:00": {
+      "main": [
+        [
+          {
+            "node": "Delete old skipped suggestions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {}
+}

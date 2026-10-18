@@ -1,0 +1,845 @@
+{
+  "id": "sdrSubEnrich0001",
+  "name": "SDR · sub · Enrich lead (Deepline + Prospeo, or Clay)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "cbfad69c-6edc-5aca-a6a3-7691c7b565f0",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "lead_id",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "0419b4a1-22f2-5a95-b57e-28d25c63e7f8",
+      "name": "Mark enriching",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'enriching' where id = $1::uuid and status in ('received', 'enriching', 'error') returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "46ba0d0a-4ada-568a-9f6c-8280e29bab33",
+      "name": "Use Clay?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1f3e835-1531-5533-b0b6-45427a0f4ffb",
+              "leftValue": "={{ $env.ENRICH_PROVIDER === 'clay' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "abcc26f8-8029-5c8c-8e38-6355dffa2ba0",
+      "name": "Send to Clay Table 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        -200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CLAY_T1_WEBHOOK_URL }}",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_id: $json.id, linkedin_url: $json.linkedin_url, source: $json.source, sdr_slack_id: $json.sdr_slack_id }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "5c9c97fa-7682-5d25-a6ad-57f014ba71f9",
+      "name": "Deepline: LinkedIn profile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DEEPLINE_API_BASE || 'https://code.deepline.com/api/v2') + '/integrations/harvestapi_get_profile/execute' }}",
+        "options": {
+          "timeout": 120000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ payload: { url: $('Mark enriching').first().json.linkedin_url } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrDeepline00001",
+          "name": "Deepline API (Bearer)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "402ca297-0256-51c4-93e8-be62634679cf",
+      "name": "Prospeo: enrich person",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.PROSPEO_API_BASE || 'https://api.prospeo.io') + '/enrich-person' }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ data: { linkedin_url: $('Mark enriching').first().json.linkedin_url }, only_verified_email: false, enrich_mobile: true }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrProspeo000001",
+          "name": "Prospeo API (X-KEY)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "7764c354-f116-533b-88fd-743ec07b5133",
+      "name": "Merge profile + Prospeo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Merge the Deepline (HarvestAPI) LinkedIn profile with the Prospeo person match.\n// LinkedIn is the source of truth for the current role; Prospeo supplies email, mobile and\n// firmographics. When Prospeo's company is not the current employer, flag a company lookup.\nconst lead = $('Mark enriching').first().json;\nconst dl = $('Deepline: LinkedIn profile').first().json;\nconst pr = $('Prospeo: enrich person').first().json;\n\nconst str = (v) => (v === undefined || v === null || typeof v === 'object' || String(v).trim() === '' ? null : String(v).trim());\nconst slugOf = (url) => {\n  const m = String(url || '').match(/linkedin\\.com\\/company\\/([^\\/?#]+)/i);\n  return m ? m[1].toLowerCase() : null;\n};\n\nconst profile = (dl && dl.result && dl.result.data && dl.result.data.element) || {};\nconst current = (Array.isArray(profile.currentPosition) && profile.currentPosition[0]) || {};\nconst prPerson = (pr && pr.error === false && pr.person) || {};\nconst prCompany = (pr && pr.error === false && pr.company) || {};\n\nconst loc = profile.location || {};\nconst currentCompanyUrl = str(current.companyLinkedinUrl);\nconst prospeoCompanyMatches = Boolean(\n  prCompany.linkedin_url && currentCompanyUrl && slugOf(prCompany.linkedin_url) === slugOf(currentCompanyUrl),\n) || (!currentCompanyUrl && Boolean(prCompany.name));\n\nconst email = prPerson.email || {};\nconst mobile = prPerson.mobile || {};\nconst emailStatus = email.email\n  ? (String(email.status || '').toUpperCase() === 'VERIFIED' ? 'valid' : String(email.status || 'unknown').toLowerCase())\n  : 'not_found';\n\nreturn [{ json: {\n  lead_id: lead.id,\n  linkedin_url: lead.linkedin_url,\n  first_name: str(profile.firstName) || str(prPerson.first_name),\n  last_name: str(prPerson.last_name) || str(profile.lastName),\n  full_name: str(prPerson.full_name) || [profile.firstName, profile.lastName].filter(Boolean).join(' ') || null,\n  title: str(current.position) || str(prPerson.current_job_title),\n  headline: str(profile.headline) || str(prPerson.headline),\n  location: str(loc.linkedinText) || [prPerson.location && prPerson.location.city, prPerson.location && prPerson.location.country].filter(Boolean).join(', ') || null,\n  about: str(profile.about),\n  linkedin_followers: profile.followerCount ?? null,\n  linkedin_connections: profile.connectionsCount ?? null,\n  company_name: str(current.companyName) || str(prCompany.name),\n  company_linkedin_url: currentCompanyUrl || str(prCompany.linkedin_url),\n  work_email: str(email.email),\n  email_status: emailStatus,\n  phone: str(mobile.mobile),\n  phone_type: str(mobile.mobile) ? 'mobile' : null,\n  company: prospeoCompanyMatches ? prCompany : null,\n  needs_company: !prospeoCompanyMatches && Boolean(currentCompanyUrl),\n  sources: {\n    deepline_job: dl && dl.job_id,\n    prospeo_match: pr && pr.error === false,\n    prospeo_error: pr && pr.error ? (pr.error_code || 'error') : null,\n  },\n} }];\n"
+      }
+    },
+    {
+      "id": "2312a583-031a-5bca-9213-69f4e7598904",
+      "name": "Need company lookup?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "61a3beec-c2b1-5bcd-b166-ddc78cc02592",
+              "leftValue": "={{ $json.needs_company }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "a732e7df-f293-59f1-a05d-e9d49dc50a15",
+      "name": "Deepline: LinkedIn company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DEEPLINE_API_BASE || 'https://code.deepline.com/api/v2') + '/integrations/harvestapi_get_company/execute' }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 120000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ payload: { url: $json.company_linkedin_url } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrDeepline00001",
+          "name": "Deepline API (Bearer)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "5da7a41f-8161-51c1-a2db-1b30d9cb2bd3",
+      "name": "Company context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Firmographics for the current employer: Prospeo's company when it matched the LinkedIn employer,\n// otherwise the employer's LinkedIn company page (Deepline / HarvestAPI). The domain comes from its website.\nconst m = $('Merge profile + Prospeo').first().json;\nconst domainOf = (url) => {\n  const host = String(url || '').trim().toLowerCase().replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split(/[\\/?#]/)[0];\n  return host.includes('.') ? host : null;\n};\n\nlet company = m.company || {};\nif ($('Deepline: LinkedIn company').isExecuted) {\n  const res = $('Deepline: LinkedIn company').first().json || {};\n  const el = (res.result && res.result.data && res.result.data.element) || null;\n  if (el && el.name) {\n    const range = el.employeeCountRange || {};\n    company = {\n      name: el.name,\n      domain: domainOf(el.website),\n      linkedin_url: el.linkedinUrl || null,\n      employee_count: el.employeeCount ?? null,\n      employee_range: range.start ? `${range.start}-${range.end || '+'}` : null,\n      industry: ((el.industries || [])[0] || {}).name || null,\n      description: el.description || el.tagline || null,\n    };\n  }\n}\n\nreturn [{ json: {\n  ...m,\n  company,\n  company_name: company.name || m.company_name,\n  company_domain: company.domain || domainOf(company.website) || null,\n} }];\n"
+      }
+    },
+    {
+      "id": "8ce1e984-f88d-56f0-9ce1-c917d0615b64",
+      "name": "Find email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1920,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "67e6d251-d019-5182-8f3a-74deb40d6cd1",
+              "leftValue": "={{ !$json.work_email && Boolean($json.company_domain) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "7b006cb8-579c-58a9-b9eb-a8c1694ec6f7",
+      "name": "Deepline: Datagma email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2160,
+        -200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DEEPLINE_API_BASE || 'https://code.deepline.com/api/v2') + '/integrations/datagma_find_email/execute' }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ payload: { first_name: $('Company context').first().json.first_name, last_name: $('Company context').first().json.last_name, full_name: $('Company context').first().json.full_name, domain: $('Company context').first().json.company_domain } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrDeepline00001",
+          "name": "Deepline API (Bearer)"
+        }
+      }
+    },
+    {
+      "id": "56514ccd-9f10-5db2-9457-d9fdaf9305b1",
+      "name": "Datagma valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2400,
+        -200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8f136b38-19ab-5e64-99c9-784616c30653",
+              "leftValue": "={{ Boolean($json.result && $json.result.data && $json.result.data.email && String($json.result.data.status).toLowerCase() === 'valid') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "e9baeea6-9073-5047-a3f5-19bd3469a8e3",
+      "name": "Deepline: Hunter email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        -300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DEEPLINE_API_BASE || 'https://code.deepline.com/api/v2') + '/integrations/hunter_email_finder/execute' }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ payload: { first_name: $('Company context').first().json.first_name, last_name: $('Company context').first().json.last_name, full_name: $('Company context').first().json.full_name, domain: $('Company context').first().json.company_domain } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrDeepline00001",
+          "name": "Deepline API (Bearer)"
+        }
+      }
+    },
+    {
+      "id": "e2f458d8-4660-523a-bc76-4aaf6ee5ea0a",
+      "name": "Lead context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Email waterfall result. Prospeo (from the person match) wins; otherwise the first valid email from\n// Datagma, then Hunter (both via Deepline), otherwise the best unverified guess.\nconst base = $('Company context').first().json;\n\nconst fromDeepline = (node, source) => {\n  if (!$(node).isExecuted) return null;\n  const data = ((($(node).first().json || {}).result) || {}).data || {};\n  if (!data.email) return null;\n  const status = String(data.status || (data.verification && data.verification.status) || 'unknown').toLowerCase();\n  return { email: String(data.email).toLowerCase(), status, source };\n};\n\nif (base.work_email) {\n  return [{ json: { ...base, email_source: 'prospeo' } }];\n}\n\nconst found = [fromDeepline('Deepline: Datagma email', 'datagma'), fromDeepline('Deepline: Hunter email', 'hunter')]\n  .filter(Boolean);\nconst best = found.find((f) => f.status === 'valid') || found[0];\nif (!best) {\n  return [{ json: { ...base, email_source: null } }];\n}\nreturn [{ json: { ...base, work_email: best.email, email_status: best.status, email_source: best.source } }];\n"
+      }
+    },
+    {
+      "id": "ff532cef-45b9-5099-8a06-2ed2384c31f3",
+      "name": "Research (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        3120,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are helping an SDR prepare a cold call. Use ONLY the data below. No guesses; if data is missing, say so.\n\nPerson: {{ $json.full_name }}, {{ $json.title }} at {{ $json.company_name }}\nHeadline: {{ $json.headline }}\nLocation: {{ $json.location }}\nAbout: {{ $json.about || 'n/a' }}\nCompany: {{ ($json.company && ($json.company.description_ai || $json.company.description)) || 'n/a' }}\nCompany size / industry: {{ ($json.company && $json.company.employee_range) || 'n/a' }} / {{ ($json.company && $json.company.industry) || 'n/a' }}\n\nReturn JSON only, no markdown: {\"summary\": [3 short bullets on who they are and what they likely care about], \"talking_points\": [3 specific cold-call openers grounded only in the data above]}",
+        "options": {}
+      }
+    },
+    {
+      "id": "e17f45ab-4180-533c-9eef-0794db216d0a",
+      "name": "LLM",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        3120,
+        220
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.LLM_MODEL || 'gpt-5-mini' }}"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "sdrOpenAi0000001",
+          "name": "LLM (OpenAI-compatible)"
+        }
+      }
+    },
+    {
+      "id": "6b007f0f-2aee-5646-b55c-a443f40b6646",
+      "name": "Build enrichment payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Build the WF2 callback payload (same shape Clay used to send) from the lead context\n// (profile + Prospeo + company page + email waterfall) and the LLM research.\nconst m = $('Lead context').first().json;\nconst company = m.company || {};\n\nconst str = (v) => (v === undefined || v === null || typeof v === 'object' || String(v).trim() === '' ? null : String(v).trim());\nlet research = {};\ntry {\n  research = JSON.parse(String($input.first().json.text || '').replace(/^```(json)?|```$/g, '').trim());\n} catch (e) {\n  research = { summary: [String($input.first().json.text || '').slice(0, 500)], talking_points: [] };\n}\n\nconst SENIOR = /\\b(vp|vice president|head|director|chief|c[eotfmr]o|founder|founding|co-founder|owner|partner|president)\\b/i;\nconst size = Number(company.employee_count) || null;\nconst icpFit = SENIOR.test(m.title || '') && (!size || (size >= 11 && size <= 1000)) ? 'yes' : 'no';\n\nreturn [{ json: {\n  lead_id: m.lead_id,\n  first_name: m.first_name,\n  last_name: m.last_name,\n  full_name: m.full_name,\n  title: m.title,\n  headline: m.headline,\n  location: m.location,\n  about: m.about,\n  linkedin_followers: m.linkedin_followers,\n  linkedin_connections: m.linkedin_connections,\n  company_name: str(company.name) || m.company_name,\n  company_domain: str(company.domain) || m.company_domain,\n  company_linkedin_url: m.company_linkedin_url || str(company.linkedin_url),\n  company_size: str(company.employee_range) || (size ? String(size) : null),\n  industry: str(company.industry),\n  company_description: str(company.description_ai) || str(company.description),\n  work_email: m.work_email,\n  email_status: m.email_status,\n  phone: m.phone,\n  phone_type: m.phone_type,\n  research: { summary: research.summary || [], talking_points: research.talking_points || research.talkingPoints || [] },\n  icp_fit: icpFit,\n  enrichment_source: 'deepline+prospeo',\n  sources: { ...m.sources, email: m.email_source },\n} }];\n"
+      }
+    },
+    {
+      "id": "6a951f1e-82ea-55cc-9392-ceff6709b580",
+      "name": "Post to WF2 (enriched)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3600,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/sdr-enriched",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrClayCb0000001",
+          "name": "Clay Callback Secret"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "277b0d68-114b-55e6-be45-c073758dd99c",
+      "name": "Report error",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3840,
+        400
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubReportErr1",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "workflow": "={{ 'SDR · sub · Enrich lead (Deepline + Prospeo, or Clay)' }}",
+            "step": "={{ $prevNode.name }}",
+            "lead_id": "={{ $('Mark enriching').first().json.id }}",
+            "error": "={{ JSON.stringify($json.error ?? $json).slice(0, 2000) }}",
+            "mark_lead": "={{ true }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "workflow",
+              "displayName": "workflow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mark_lead",
+              "displayName": "mark_lead",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Mark enriching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark enriching": {
+      "main": [
+        [
+          {
+            "node": "Use Clay?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Clay?": {
+      "main": [
+        [
+          {
+            "node": "Send to Clay Table 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Deepline: LinkedIn profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deepline: LinkedIn profile": {
+      "main": [
+        [
+          {
+            "node": "Prospeo: enrich person",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prospeo: enrich person": {
+      "main": [
+        [
+          {
+            "node": "Merge profile + Prospeo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge profile + Prospeo": {
+      "main": [
+        [
+          {
+            "node": "Need company lookup?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Need company lookup?": {
+      "main": [
+        [
+          {
+            "node": "Deepline: LinkedIn company",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Company context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deepline: LinkedIn company": {
+      "main": [
+        [
+          {
+            "node": "Company context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Company context": {
+      "main": [
+        [
+          {
+            "node": "Find email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find email?": {
+      "main": [
+        [
+          {
+            "node": "Deepline: Datagma email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lead context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deepline: Datagma email": {
+      "main": [
+        [
+          {
+            "node": "Datagma valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Datagma valid?": {
+      "main": [
+        [
+          {
+            "node": "Lead context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Deepline: Hunter email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deepline: Hunter email": {
+      "main": [
+        [
+          {
+            "node": "Lead context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead context": {
+      "main": [
+        [
+          {
+            "node": "Research (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Research (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Build enrichment payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build enrichment payload": {
+      "main": [
+        [
+          {
+            "node": "Post to WF2 (enriched)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Research (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Clay Table 1": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to WF2 (enriched)": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

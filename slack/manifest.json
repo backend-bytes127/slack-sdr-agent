@@ -1,0 +1,33 @@
+{
+  "display_information": {
+    "name": "SDR Agent",
+    "description": "Paste a LinkedIn URL, get an enriched lead card, call actions and follow-up.",
+    "background_color": "#1d4ed8"
+  },
+  "features": {
+    "bot_user": { "display_name": "SDR Agent", "always_online": true },
+    "slash_commands": [
+      {
+        "command": "/prospect",
+        "url": "https://YOUR-NGROK-DOMAIN/webhook/sdr-intake",
+        "description": "Enrich a LinkedIn profile and create the lead",
+        "usage_hint": "https://www.linkedin.com/in/<slug>",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": ["commands", "chat:write", "chat:write.public", "users:read", "users:read.email"]
+    }
+  },
+  "settings": {
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://YOUR-NGROK-DOMAIN/webhook/sdr-actions"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

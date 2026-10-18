@@ -1,0 +1,545 @@
+{
+  "id": "sdrWf1Intake0001",
+  "name": "SDR · WF1 Intake (/prospect)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "efad4675-5d61-5e0f-8c2f-fc85612226b8",
+      "name": "Slack /prospect",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sdr-intake",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "sdr-intake"
+    },
+    {
+      "id": "1272624a-01f9-5f1f-8929-9891b971961b",
+      "name": "Verify Slack signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Verify the Slack request signature: HMAC-SHA256(\"v0:\" + ts + \":\" + rawBody) with the signing secret.\n// Rejects requests older than 5 minutes. Outputs { valid, reason, body }.\nconst crypto = require('crypto');\n\nconst MAX_AGE_SECONDS = 300;\nconst item = $input.first();\nconst headers = item.json.headers || {};\nconst ts = headers['x-slack-request-timestamp'];\nconst signature = headers['x-slack-signature'];\nconst secret = $env.SLACK_SIGNING_SECRET;\n\nconst fail = (reason) => [{ json: { valid: false, reason, body: item.json.body } }];\n\nif (!secret) return fail('SLACK_SIGNING_SECRET is not set');\nif (!ts || !signature) return fail('missing Slack signature headers');\nif (Math.abs(Date.now() / 1000 - Number(ts)) > MAX_AGE_SECONDS) return fail('stale request');\n\nlet raw = '';\nif (item.binary && item.binary.data) {\n  raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\n}\n\nconst expected = 'v0=' + crypto.createHmac('sha256', secret).update(`v0:${ts}:${raw}`).digest('hex');\nconst valid = expected.length === signature.length &&\n  crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));\n\nreturn valid ? [{ json: { valid: true, body: item.json.body } }] : fail('bad signature');\n"
+      }
+    },
+    {
+      "id": "a53ec3c0-b48e-508c-83f7-e4f1a2c5ba58",
+      "name": "Valid signature?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "838ce378-9d3d-5061-93d4-e61b804d50b8",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "2f46db5d-6425-519f-8b70-4330ec28b996",
+      "name": "Ack within 3s",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ response_type: 'ephemeral', text: 'Got it, enriching now.' }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "59c41a0c-43bc-56ac-95a5-3c20f467e670",
+      "name": "Reject 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        720,
+        250
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'invalid signature' }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "1fc4ddea-2362-5bf1-b5f4-11dce97a417d",
+      "name": "Normalize URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Accept only personal profile URLs (linkedin.com/in/<slug>), strip tracking params and\n// trailing slashes, lowercase, and rebuild as https://www.linkedin.com/in/<slug>.\nconst body = $('Verify Slack signature').first().json.body || {};\nconst text = String(body.text || '').trim().replace(/^<|>$/g, '').split('|')[0];\n\nconst match = text.match(/linkedin\\.com\\/(?:mwlite\\/)?in\\/([^\\/?#\\s]+)/i);\nlet slug = null;\nif (match) {\n  try { slug = decodeURIComponent(match[1]).toLowerCase(); } catch (e) { slug = match[1].toLowerCase(); }\n}\n\nconst base = {\n  user_id: body.user_id || null,\n  channel_id: body.channel_id || null,\n  response_url: body.response_url || null,\n  raw_text: text,\n};\n\nif (!slug) {\n  const hint = /linkedin\\.com\\/(company|sales|school|pub)\\//i.test(text)\n    ? 'That looks like a company, school or Sales Navigator link.'\n    : 'I could not find a LinkedIn profile URL in that.';\n  return [{ json: { ...base, ok: false,\n    error: `${hint} Use a personal profile URL like https://www.linkedin.com/in/jane-doe` } }];\n}\n\nreturn [{ json: { ...base, ok: true, linkedin_url: `https://www.linkedin.com/in/${slug}` } }];\n"
+      }
+    },
+    {
+      "id": "3ba1b09c-0ac6-5823-a59a-16d0a7773517",
+      "name": "Valid LinkedIn URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a38865db-895c-5e69-ab2d-6dd956f7c3b5",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "95653c40-59ef-51a3-863e-19815b378e8a",
+      "name": "Reply invalid URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        250
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.response_url }}",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ response_type: 'ephemeral', text: ':x: ' + $json.error }) }}"
+      }
+    },
+    {
+      "id": "811fe298-4a63-5e5a-b5b8-404c2e561c08",
+      "name": "Create lead (dedupe)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1440,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into leads (linkedin_url, sdr_slack_id, slack_channel_id, status, source) values ($1, $2, $3, 'received', 'slack_command') on conflict (linkedin_url) do nothing returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$json.linkedin_url, $json.user_id ?? null, $env.SLACK_CHANNEL_ID ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "78393ba8-9b72-5de3-9a8d-e251a9674de5",
+      "name": "New lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c009e05d-ff8c-5f9b-958a-8b16b139ea35",
+              "leftValue": "={{ Boolean($json.id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "cb2da064-5fb7-5c70-812e-a9e8f817e960",
+      "name": "Load existing lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1920,
+        250
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select * from leads where linkedin_url = $1",
+        "options": {
+          "queryReplacement": "={{ [$('Normalize URL').first().json.linkedin_url] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "be5b69b2-e673-534f-9d86-3831c409eadd",
+      "name": "Reply already in pipeline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2160,
+        250
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Normalize URL').first().json.response_url }}",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ response_type: 'ephemeral', text: ':repeat: Already in the pipeline, owned by ' + ($json.sdr_slack_id ? '<@' + $json.sdr_slack_id + '>' : 'another SDR') + ', status `' + $json.status + '`' + ($json.slack_thread_ts ? ' · <https://slack.com/archives/' + $json.slack_channel_id + '/p' + String($json.slack_thread_ts).replace('.', '') + '|open thread>' : '') }) }}"
+      }
+    },
+    {
+      "id": "2cab35a6-42f7-598c-9ff8-e13c203e2e74",
+      "name": "Open Slack thread",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postMessage' }}",
+            "payload": "={{ ({ channel: $env.SLACK_CHANNEL_ID, unfurl_links: false, text: ':hourglass_flowing_sand: Enriching ' + $('Normalize URL').first().json.linkedin_url + ' for <@' + $('Normalize URL').first().json.user_id + '>' }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "68cfebef-ed3c-5f85-b144-90823a0d4b07",
+      "name": "Save thread ts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2160,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set slack_channel_id = $2, slack_thread_ts = $3 where id = $1::uuid returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Create lead (dedupe)').first().json.id, $json.channel ?? null, $json.ts ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "478555dc-4081-5444-a15a-83f3bf1efcdc",
+      "name": "Enrich lead (sub)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2400,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubEnrich0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Slack /prospect": {
+      "main": [
+        [
+          {
+            "node": "Verify Slack signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Slack signature": {
+      "main": [
+        [
+          {
+            "node": "Valid signature?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid signature?": {
+      "main": [
+        [
+          {
+            "node": "Ack within 3s",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack within 3s": {
+      "main": [
+        [
+          {
+            "node": "Normalize URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize URL": {
+      "main": [
+        [
+          {
+            "node": "Valid LinkedIn URL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid LinkedIn URL?": {
+      "main": [
+        [
+          {
+            "node": "Create lead (dedupe)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply invalid URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create lead (dedupe)": {
+      "main": [
+        [
+          {
+            "node": "New lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New lead?": {
+      "main": [
+        [
+          {
+            "node": "Open Slack thread",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load existing lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load existing lead": {
+      "main": [
+        [
+          {
+            "node": "Reply already in pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Slack thread": {
+      "main": [
+        [
+          {
+            "node": "Save thread ts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save thread ts": {
+      "main": [
+        [
+          {
+            "node": "Enrich lead (sub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

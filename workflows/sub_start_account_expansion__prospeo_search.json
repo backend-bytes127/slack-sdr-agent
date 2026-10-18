@@ -1,0 +1,875 @@
+{
+  "id": "sdrSubExpStart01",
+  "name": "SDR · sub · Start account expansion (Prospeo search)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "da4ef763-a698-50ba-b8bb-bf091e47b714",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "lead_id",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3ef6d0b2-c8b5-51b5-8b15-42938a33f7d4",
+      "name": "Create expansion run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with l as (select * from leads where id = $1::uuid),\nrecent as (\n  select r.id, r.created_at, x.slack_channel_id as rc, x.slack_thread_ts as rt\n  from expansion_runs r join leads x on x.id = r.lead_id, l\n  where l.company_domain is not null and r.company_domain = l.company_domain\n    and r.created_at > now() - interval '30 days' and r.status <> 'error'\n  order by r.created_at desc limit 1\n),\nins as (\n  insert into expansion_runs (lead_id, company_domain, company_name, slack_channel_id, slack_thread_ts)\n  select l.id, l.company_domain, l.company_name, l.slack_channel_id, l.slack_thread_ts from l\n  where (l.company_domain is not null or l.company_linkedin_url is not null) and not exists (select 1 from recent)\n  returning *\n)\nselect l.*, (select row_to_json(recent) from recent) as recent_run,\n       (select row_to_json(ins) from ins) as new_run\nfrom l",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "6ca22530-016e-5e86-aa76-3e3e1d88fabe",
+      "name": "Decide",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// After the start-expansion SQL: either search the account for a new run, or explain why not.\nconst row = $input.first().json;\nconst company = row.company_name || row.company_domain || 'this company';\nconst permalink = (channel, ts) => (channel && ts ? `https://slack.com/archives/${channel}/p${String(ts).replace('.', '')}` : null);\n\nif (row.new_run) {\n  return [{ json: { start: true, run: row.new_run, lead: row } }];\n}\n\nlet text;\nif (!row.company_domain && !row.company_linkedin_url) {\n  text = `:mag: Can't search for colleagues: no company was found for ${row.full_name || 'this lead'}.`;\n} else if (row.recent_run) {\n  const when = new Date(row.recent_run.created_at).toISOString().slice(0, 10);\n  const link = permalink(row.recent_run.rc, row.recent_run.rt);\n  text = `:mag: Already searched *${company}* on ${when}${link ? ` (<${link}|see that thread>)` : ''}. No new search spend.`;\n} else {\n  text = `:mag: Could not start the colleague search for ${company}.`;\n}\n\nreturn [{ json: { start: false, payload: { channel: row.slack_channel_id, thread_ts: row.slack_thread_ts, text } } }];\n"
+      }
+    },
+    {
+      "id": "1f06734f-d099-5468-8c1a-06554ed3f0b5",
+      "name": "New run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "147624d3-b6eb-59f1-a255-c3bdc8bdfcea",
+              "leftValue": "={{ $json.start }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "fa470e4b-a0da-5cdd-a689-3f8c6eec08d1",
+      "name": "Explain skip",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        250
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postMessage' }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "6e6865e5-d0bf-59b7-950a-c60f059a2cca",
+      "name": "Prospeo: search people",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.PROSPEO_API_BASE || 'https://api.prospeo.io') + '/search-person' }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ page: 1, filters: { company: $('Decide').first().json.lead.company_domain ? { websites: { include: [$('Decide').first().json.lead.company_domain] } } : { names: { include: [$('Decide').first().json.lead.company_name || '__none__'] } }, person_seniority: { include: ['C-Suite', 'Founder/Owner', 'Vice President', 'Director', 'Head', 'Partner'] } } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrProspeo000001",
+          "name": "Prospeo API (X-KEY)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "6910e53d-9770-539b-91d7-9c68264098b0",
+      "name": "Prospeo found people?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "12cd391c-4caa-5de0-87e4-797f330d08dc",
+              "leftValue": "={{ ($json.results || []).length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "47ec5c69-3497-571c-8314-013f30e5adaf",
+      "name": "Deepline: LinkedIn employees",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DEEPLINE_API_BASE || 'https://code.deepline.com/api/v2') + '/integrations/harvestapi_search_leads/execute' }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 120000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ payload: { currentCompanies: $('Decide').first().json.lead.company_linkedin_url || $('Decide').first().json.lead.company_name } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrDeepline00001",
+          "name": "Deepline API (Bearer)"
+        }
+      }
+    },
+    {
+      "id": "55b2b230-e08e-5c90-abd7-5baaf83f341d",
+      "name": "Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// People at the lead's account: Prospeo search (decision-maker seniorities), or LinkedIn employees via\n// Deepline/HarvestAPI when Prospeo has nobody. Drops the original lead, persona exclusions and duplicates.\nconst { lead } = $('Decide').first().json;\nconst MAX_CANDIDATES = 20;\nconst EXCLUDE = /\\b(intern|recruit\\w*|talent|human resources|hr|student|assistant|trainee)\\b/i;\n\nconst slugOf = (url) => {\n  const m = String(url || '').match(/linkedin\\.com\\/in\\/([^\\/?#\\s]+)/i);\n  if (!m) return null;\n  try { return decodeURIComponent(m[1]).toLowerCase(); } catch (e) { return m[1].toLowerCase(); }\n};\nconst norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');\n\nlet people = [];\nlet source = null;\nconst search = $('Prospeo: search people').first().json || {};\nif (Array.isArray(search.results) && search.results.length) {\n  source = 'prospeo';\n  people = search.results.map(({ person = {} }) => {\n    const loc = person.location || {};\n    return {\n      linkedin_url: person.linkedin_url,\n      first_name: person.first_name,\n      last_name: person.last_name,\n      full_name: person.full_name,\n      title: person.current_job_title,\n      headline: person.headline,\n      location: [loc.city, loc.country].filter(Boolean).join(', ') || null,\n    };\n  });\n} else if ($('Deepline: LinkedIn employees').isExecuted) {\n  source = 'linkedin';\n  const res = $('Deepline: LinkedIn employees').first().json || {};\n  const elements = (res.result && res.result.data && res.result.data.elements) || [];\n  // HarvestAPI matches currentCompanies by name, so keep only people whose current company is the lead's\n  people = elements\n    .map((e) => ({ e, pos: (e.currentPositions || [])[0] || {} }))\n    .filter(({ pos }) => !lead.company_name || norm(pos.companyName) === norm(lead.company_name))\n    .map(({ e, pos }) => ({\n      linkedin_url: e.linkedinUrl,\n      first_name: e.firstName,\n      last_name: e.lastName,\n      full_name: [e.firstName, e.lastName].filter(Boolean).join(' ').trim() || null,\n      title: pos.title || null,\n      headline: e.headline || null,\n      location: (e.location && e.location.linkedinText) || null,\n    }));\n}\n\nconst original = slugOf(lead.linkedin_url);\nconst seen = new Set();\nconst candidates = people.filter((p) => {\n  const slug = slugOf(p.linkedin_url);\n  if (!slug || slug === original || seen.has(slug)) return false;\n  seen.add(slug);\n  return !EXCLUDE.test(`${p.title || ''}`);\n}).slice(0, MAX_CANDIDATES);\n\nreturn [{ json: { source, candidates } }];\n"
+      }
+    },
+    {
+      "id": "db939910-be16-5519-9f4a-4f58d0d8ae1f",
+      "name": "Any candidates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "707b697e-ed38-50eb-9c74-d94cf6a0fc95",
+              "leftValue": "={{ $json.candidates.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "e09f1adf-c276-5172-aeda-b768cb17fd74",
+      "name": "Fit (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1920,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Score how well each person fits this buyer persona. An SDR wants other people to call at the same account.\n\nPersona: {{ $env.BUYER_PERSONA || 'senior decision makers in sales, growth or revenue' }}\nOriginal lead: {{ $('Decide').first().json.lead.title }} at {{ $('Decide').first().json.lead.company_name }}\n\nPeople (index. title | headline):\n{{ $json.candidates.map((c, i) => i + '. ' + (c.title || 'n/a') + ' | ' + String(c.headline || '').slice(0, 120)).join('\\n') }}\n\nReturn JSON only, no markdown: [{\"i\": <index>, \"score\": <1-5>, \"reason\": \"<one short line>\"}] with one entry per person.",
+        "options": {}
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "5c798a6b-2c76-5acd-9fe7-c642417cb838",
+      "name": "LLM",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        220
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.LLM_MODEL || 'gpt-5-mini' }}"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "sdrOpenAi0000001",
+          "name": "LLM (OpenAI-compatible)"
+        }
+      }
+    },
+    {
+      "id": "bdaac0e7-d823-575d-98c3-41dbea740fae",
+      "name": "Pick top people",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Rank candidates by the LLM persona-fit score and keep the best 8 with fit >= 3 (Clay Table 2 used limit 8).\n// If the LLM answer can't be parsed, keep the first 8 unscored rather than dropping everyone.\nconst MAX_PEOPLE = 8;\nconst MIN_SCORE = 3;\nconst { run } = $('Decide').first().json;\nconst { candidates } = $('Candidates').first().json;\n\nlet scores = [];\nif ($('Fit (LLM)').isExecuted) {\n  try {\n    scores = JSON.parse(String($('Fit (LLM)').first().json.text || '').replace(/^```(json)?|```$/g, '').trim());\n  } catch (e) {\n    scores = [];\n  }\n}\nif (!Array.isArray(scores)) scores = [];\nconst byIndex = new Map(scores.map((s) => [Number(s.i), s]));\n\nconst people = candidates\n  .map((c, i) => {\n    const s = byIndex.get(i) || {};\n    const score = Number(s.score) || null;\n    return { ...c, fit: { score, reason: s.reason || null } };\n  })\n  .filter((c) => !scores.length || (c.fit.score || 0) >= MIN_SCORE)\n  .sort((a, b) => (b.fit.score || 0) - (a.fit.score || 0))\n  .slice(0, MAX_PEOPLE);\n\nreturn [{ json: { run_id: run.id, expected_total: people.length, people } }];\n"
+      }
+    },
+    {
+      "id": "75e7a7f4-c7ba-5245-8344-fcbc5dcd26db",
+      "name": "Post expected total",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/sdr-expansion",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'expected_total', run_id: $json.run_id, expected_total: $json.expected_total }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrClayCb0000001",
+          "name": "Clay Callback Secret"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "79a9dbd7-bef6-5aed-9022-69969205d21b",
+      "name": "Any people?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bb23d942-0041-57f6-ab23-d58dbff1bbd9",
+              "leftValue": "={{ $('Pick top people').first().json.expected_total > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "031d8bf8-74b3-5c37-85cf-67efc33fb11c",
+      "name": "Split people",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return $('Pick top people').first().json.people.map((p) => ({ json: p }));"
+      }
+    },
+    {
+      "id": "1a8128e0-bb42-5861-90f5-86802567b23d",
+      "name": "Deepline: Datagma email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DEEPLINE_API_BASE || 'https://code.deepline.com/api/v2') + '/integrations/datagma_find_email/execute' }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ payload: { first_name: $json.first_name, last_name: $json.last_name, full_name: $json.full_name, domain: $('Decide').first().json.lead.company_domain } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrDeepline00001",
+          "name": "Deepline API (Bearer)"
+        }
+      }
+    },
+    {
+      "id": "435450cf-737d-5694-ac7c-c5cfbfc8b8aa",
+      "name": "Person callbacks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// One WF5 \"person\" callback per suggested colleague, with the Datagma email result (same shape the\n// Clay Table 2 child rows posted). Items line up 1:1 with \"Split people\".\nconst { run_id } = $('Pick top people').first().json;\nconst people = $('Split people').all();\n\nreturn $input.all().map((item, i) => {\n  const data = ((item.json || {}).result || {}).data || {};\n  const email = data.email\n    ? { work_email: String(data.email).toLowerCase(), email_status: String(data.status || 'unknown').toLowerCase() }\n    : { work_email: null, email_status: 'not_found' };\n  return { json: { type: 'person', run_id, ...people[i].json, ...email } };\n});\n"
+      }
+    },
+    {
+      "id": "6ae50800-3af5-50a6-8261-4700537acdb4",
+      "name": "Post people",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3600,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/sdr-expansion",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrClayCb0000001",
+          "name": "Clay Callback Secret"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "769237ff-f001-558f-88f9-5eca6610ed22",
+      "name": "Mark run error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3840,
+        400
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate expansion_runs set status = 'error' where id = $1::uuid returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Decide').first().json.run.id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "b689d9bb-928d-5809-a342-0b009bfde45d",
+      "name": "Report error",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        4080,
+        400
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubReportErr1",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "workflow": "={{ 'SDR · sub · Start account expansion (Prospeo search)' }}",
+            "step": "={{ 'Account expansion' }}",
+            "lead_id": "={{ $('Decide').first().json.lead.id }}",
+            "error": "={{ 'Account expansion failed (people search or WF5 callback)' }}",
+            "mark_lead": "={{ false }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "workflow",
+              "displayName": "workflow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mark_lead",
+              "displayName": "mark_lead",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Create expansion run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create expansion run": {
+      "main": [
+        [
+          {
+            "node": "Decide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide": {
+      "main": [
+        [
+          {
+            "node": "New run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New run?": {
+      "main": [
+        [
+          {
+            "node": "Prospeo: search people",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explain skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prospeo: search people": {
+      "main": [
+        [
+          {
+            "node": "Prospeo found people?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prospeo found people?": {
+      "main": [
+        [
+          {
+            "node": "Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Deepline: LinkedIn employees",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deepline: LinkedIn employees": {
+      "main": [
+        [
+          {
+            "node": "Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Candidates": {
+      "main": [
+        [
+          {
+            "node": "Any candidates?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any candidates?": {
+      "main": [
+        [
+          {
+            "node": "Fit (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pick top people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fit (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Pick top people",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark run error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Fit (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick top people": {
+      "main": [
+        [
+          {
+            "node": "Post expected total",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post expected total": {
+      "main": [
+        [
+          {
+            "node": "Any people?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark run error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any people?": {
+      "main": [
+        [
+          {
+            "node": "Split people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split people": {
+      "main": [
+        [
+          {
+            "node": "Deepline: Datagma email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deepline: Datagma email": {
+      "main": [
+        [
+          {
+            "node": "Person callbacks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Person callbacks": {
+      "main": [
+        [
+          {
+            "node": "Post people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post people": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Mark run error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark run error": {
+      "main": [
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

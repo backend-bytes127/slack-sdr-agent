@@ -1,0 +1,255 @@
+{
+  "id": "sdrWf2Enriched01",
+  "name": "SDR · WF2 Enriched (enrichment callback)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "4d067642-e02f-5bdb-bf09-e9c518cf675b",
+      "name": "Enrichment callback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sdr-enriched",
+        "responseMode": "responseNode",
+        "options": {},
+        "authentication": "headerAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrClayCb0000001",
+          "name": "Clay Callback Secret"
+        }
+      },
+      "webhookId": "sdr-enriched"
+    },
+    {
+      "id": "4e201b72-388e-5a43-9e99-674f1aaf75bf",
+      "name": "Ack 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "ddc7af4b-d7da-569b-b75d-a81a61dfaa5e",
+      "name": "Normalize enrichment payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Normalise the Clay Table 1 callback into the leads columns.\n// Clay sends whole enrichment objects (person, company, email_status) plus flat values; it may\n// send numbers as strings and objects as JSON strings, so coerce everything defensively.\nconst UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nconst raw = $input.first().json.body || {};\n\nconst str =(v) => (v === undefined || v === null || typeof v === 'object' || String(v).trim() === '' ? null : String(v).trim());\nconst int = (v) => {\n  const n = parseInt(String(v ?? '').replace(/[^0-9]/g, ''), 10);\n  return Number.isFinite(n) ? n : null;\n};\nconst parseMaybeJson = (v) => {\n  if (v && typeof v === 'object') return v;\n  if (typeof v !== 'string') return null;\n  try { return JSON.parse(v.replace(/^```(json)?|```$/g, '').trim()); } catch (e) { return null; }\n};\n// First non-empty value among candidate keys, searched in each object in order\nconst pick = (objs, keys) => {\n  for (const o of objs) {\n    if (!o || typeof o !== 'object') continue;\n    for (const k of keys) {\n      const v = k.split('.').reduce((acc, part) => (acc == null ? acc : acc[part]), o);\n      if (v !== undefined && v !== null && v !== '' && typeof v !== 'object') return v;\n    }\n  }\n  return null;\n};\nconst asLines = (v) => {\n  if (Array.isArray(v)) return v.map((x) => `• ${String(x).replace(/^[-•*]\\s*/, '')}`).join('\\n');\n  return str(v);\n};\nconst domain = (v) => {\n  const s = str(v);\n  return s ? s.toLowerCase().replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0] : null;\n};\n\n// Clay sends { lead_id, payload } where payload is the n8n_payload formula (object or JSON string)\nconst packed = parseMaybeJson(raw.payload);\nconst b = packed ? { ...packed, lead_id: raw.lead_id } : raw;\n\nif (!UUID.test(String(str(b.lead_id) || ''))) {\n  throw new Error(`Clay callback without a valid lead_id: ${JSON.stringify(b).slice(0, 300)}`);\n}\n\nconst person = parseMaybeJson(b.person) || {};\nconst companyRaw = parseMaybeJson(b.company) || {};\n// Current job: Clay's latest_experience, else the first current entry in experience[]\nconst currentJob = (person.latest_experience && typeof person.latest_experience === 'object')\n  ? person.latest_experience\n  : ((Array.isArray(person.experience) ? person.experience : []).find((e) => e && e.is_current) || {});\nconst jobDomain = domain(pick([currentJob, b], ['company_domain', 'domain']));\n// Only trust firmographics that describe the current employer (Clay can match a board seat instead)\nconst companyDomain = domain(pick([companyRaw], ['companyWebsite', 'domain', 'website']));\nconst company = !jobDomain || !companyDomain || companyDomain === jobDomain ? companyRaw : {};\nconst P = [person, currentJob, b];\n\nconst research = parseMaybeJson(b.research) || {};\nconst emailObj = parseMaybeJson(b.email_status);\nconst emailStatusRaw = emailObj\n  ? pick([emailObj, emailObj.results], ['status', 'result', 'results.status', 'message', 'email_status'])\n  : str(b.email_status);\nconst workEmail = str(b.work_email) ? str(b.work_email).toLowerCase() : null;\n\nconst firstName = str(pick(P, ['first_name', 'firstName']));\nconst lastName = str(pick(P, ['last_name', 'lastName']));\nconst talking = research.talking_points || research.talkingPoints;\n\nreturn [{ json: {\n  lead_id: str(b.lead_id),\n  first_name: firstName,\n  last_name: lastName,\n  full_name: str(pick(P, ['name', 'full_name', 'fullName'])) || [firstName, lastName].filter(Boolean).join(' ') || null,\n  title: str(pick(P, ['title', 'job_title', 'jobTitle', 'latest_experience.title'])),\n  headline: str(pick(P, ['headline'])),\n  location: str(pick(P, ['location_name', 'location', 'locality'])),\n  about: str(pick(P, ['summary', 'about'])),\n  company_name: str(pick([person, currentJob, company, b], ['org', 'company', 'companyName', 'company_name'])),\n  company_domain: jobDomain || companyDomain,\n  company_linkedin_url: str(pick([currentJob, company, b], ['url', 'companyLinkedinUrl', 'company_linkedin_url'])),\n  company_size: str(pick([company, b], ['companySize', 'size', 'employeeCount', 'company_size'])),\n  industry: str(pick([company, b], ['industry', 'hubspotIndustry'])),\n  company_description: str(pick([company, b], ['aboutUs', 'description', 'company_description'])),\n  work_email: workEmail,\n  email_status: workEmail ? (String(emailStatusRaw || 'unknown').toLowerCase()) : 'not_found',\n  phone: str(b.phone),\n  phone_type: str(b.phone_type) || (str(b.phone) ? 'mobile' : null),\n  linkedin_followers: int(pick(P, ['num_followers', 'followers', 'follower_count', 'linkedin_followers'])),\n  linkedin_connections: int(pick(P, ['connections', 'num_connections', 'connection_count', 'linkedin_connections'])),\n  research_summary: asLines(research.summary) || (Object.keys(research).length ? null : str(b.research)),\n  talking_points: asLines(talking) || str(b.talking_points),\n  icp_fit: str(b.icp_fit),\n  enrichment: b,\n} }];\n"
+      }
+    },
+    {
+      "id": "c55cc7b4-362a-5e07-b5a3-198ee845352d",
+      "name": "Save enrichment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set\n  first_name = $2, last_name = $3, full_name = $4, title = $5, headline = $6, location = $7, about = $8,\n  company_name = $9, company_domain = $10, company_linkedin_url = $11, company_size = $12, industry = $13,\n  company_description = $14, work_email = $15, email_status = $16, phone = $17, phone_type = $18,\n  linkedin_followers = $19::int, linkedin_connections = $20::int, research_summary = $21, talking_points = $22,\n  icp_fit = $23, enrichment = $24::jsonb, status = 'enriched'\nwhere id = $1::uuid and status in ('received', 'enriching', 'error')\nreturning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id ?? null, $json.first_name ?? null, $json.last_name ?? null, $json.full_name ?? null, $json.title ?? null, $json.headline ?? null, $json.location ?? null, $json.about ?? null, $json.company_name ?? null, $json.company_domain ?? null, $json.company_linkedin_url ?? null, $json.company_size ?? null, $json.industry ?? null, $json.company_description ?? null, $json.work_email ?? null, $json.email_status ?? null, $json.phone ?? null, $json.phone_type ?? null, $json.linkedin_followers ?? null, $json.linkedin_connections ?? null, $json.research_summary ?? null, $json.talking_points ?? null, $json.icp_fit ?? null, JSON.stringify($json.enrichment)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "6f643137-de4d-59a8-bdf3-59e2befd8e65",
+      "name": "HubSpot sync (sub)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubHsSync0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "bbbf4511-0b80-5047-81ad-95e732c95209",
+      "name": "Post lead card (sub)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubLeadCard01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Save enrichment').first().json.id }}",
+            "mode": "={{ 'post' }}",
+            "note": "={{ '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mode",
+              "displayName": "mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "note",
+              "displayName": "note",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Enrichment callback": {
+      "main": [
+        [
+          {
+            "node": "Ack 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack 200": {
+      "main": [
+        [
+          {
+            "node": "Normalize enrichment payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize enrichment payload": {
+      "main": [
+        [
+          {
+            "node": "Save enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save enrichment": {
+      "main": [
+        [
+          {
+            "node": "HubSpot sync (sub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot sync (sub)": {
+      "main": [
+        [
+          {
+            "node": "Post lead card (sub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

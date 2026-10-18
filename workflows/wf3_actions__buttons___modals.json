@@ -1,0 +1,3907 @@
+{
+  "id": "sdrWf3Actions001",
+  "name": "SDR · WF3 Actions (buttons + modals)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "d405b93e-ccac-56bb-9ebc-bc1ce4711038",
+      "name": "Slack interactivity",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        600
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sdr-actions",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "sdr-actions"
+    },
+    {
+      "id": "5468c2f9-eaea-574d-a540-f6157f037c8c",
+      "name": "Verify Slack signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        600
+      ],
+      "parameters": {
+        "jsCode": "// Verify the Slack request signature: HMAC-SHA256(\"v0:\" + ts + \":\" + rawBody) with the signing secret.\n// Rejects requests older than 5 minutes. Outputs { valid, reason, body }.\nconst crypto = require('crypto');\n\nconst MAX_AGE_SECONDS = 300;\nconst item = $input.first();\nconst headers = item.json.headers || {};\nconst ts = headers['x-slack-request-timestamp'];\nconst signature = headers['x-slack-signature'];\nconst secret = $env.SLACK_SIGNING_SECRET;\n\nconst fail = (reason) => [{ json: { valid: false, reason, body: item.json.body } }];\n\nif (!secret) return fail('SLACK_SIGNING_SECRET is not set');\nif (!ts || !signature) return fail('missing Slack signature headers');\nif (Math.abs(Date.now() / 1000 - Number(ts)) > MAX_AGE_SECONDS) return fail('stale request');\n\nlet raw = '';\nif (item.binary && item.binary.data) {\n  raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\n}\n\nconst expected = 'v0=' + crypto.createHmac('sha256', secret).update(`v0:${ts}:${raw}`).digest('hex');\nconst valid = expected.length === signature.length &&\n  crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));\n\nreturn valid ? [{ json: { valid: true, body: item.json.body } }] : fail('bad signature');\n"
+      }
+    },
+    {
+      "id": "483f7e35-9715-5efd-89ec-16f1c52ee149",
+      "name": "Valid signature?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2b1d411b-5f36-5fc7-b5c0-e2d61b2ef90c",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "c856c681-ca6b-5419-95b0-68825710bf2a",
+      "name": "Ack 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        600,
+        500
+      ],
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "ca8647da-e2e6-50fb-85a9-b923066b26e0",
+      "name": "Reject 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        600,
+        750
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'invalid signature' }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "002cac89-eed2-510f-a191-cd4a199bcba5",
+      "name": "Parse Slack payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        500
+      ],
+      "parameters": {
+        "jsCode": "// Parse a Slack interactivity payload (button click or modal submit) into one flat item.\n// `route` is the Switch output index; unknown actions go to the last output.\nconst ROUTES = [\n  'call_no_answer', 'call_connected', 'wrong_person', 'call_notes_submit',\n  'send_message', 'edit_message', 'edit_message_submit', 'regenerate_message',\n  'copy_message', 'add_suggested_lead', 'skip_suggested_lead', 'retry_lead',\n];\nconst UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n\nconst body = $('Verify Slack signature').first().json.body || {};\nlet payload = {};\ntry { payload = JSON.parse(body.payload || '{}'); } catch (e) { payload = {}; }\n\nconst flattenState = (state) => {\n  const out = {};\n  for (const block of Object.values((state && state.values) || {})) {\n    for (const [actionId, field] of Object.entries(block)) {\n      out[actionId] = field.selected_option ? field.selected_option.value : (field.value ?? null);\n    }\n  }\n  return out;\n};\n\nlet action = 'unknown';\nlet leadId = null;\nlet meta = {};\nlet values = {};\n\nif (payload.type === 'block_actions') {\n  const first = (payload.actions || [])[0] || {};\n  action = first.action_id || 'unknown';\n  leadId = first.value || null;\n} else if (payload.type === 'view_submission') {\n  action = (payload.view && payload.view.callback_id) || 'unknown';\n  try { meta = JSON.parse((payload.view && payload.view.private_metadata) || '{}'); } catch (e) { meta = {}; }\n  leadId = meta.lead_id || null;\n  values = flattenState(payload.view && payload.view.state);\n}\n\nconst index = ROUTES.indexOf(action);\nconst user = payload.user || {};\n\nreturn [{ json: {\n  route: index === -1 || !UUID.test(String(leadId)) ? ROUTES.length : index,\n  action,\n  lead_id: UUID.test(String(leadId)) ? leadId : null,\n  user_id: user.id || null,\n  user_name: user.name || user.username || null,\n  trigger_id: payload.trigger_id || null,\n  channel: (payload.channel && payload.channel.id) || (payload.container && payload.container.channel_id) || meta.channel || null,\n  message_ts: (payload.container && payload.container.message_ts) || meta.message_ts || null,\n  values,\n  meta,\n} }];\n"
+      }
+    },
+    {
+      "id": "8d65fd73-8229-569b-94f7-3f766f349b43",
+      "name": "Route action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1000,
+        500
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 13,
+        "output": "={{ $json.route }}"
+      }
+    },
+    {
+      "id": "db286857-b0e2-54cc-b82c-8ba8251cf906",
+      "name": "Unknown action",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        2300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "d8d23c61-dc8a-55c2-a0cc-a72437cdb2fd",
+      "name": "No answer: claim",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'called_no_answer' where id = $1::uuid and status in ('in_crm', 'enriched') returning *, exists(select 1 from outreach_events o where o.lead_id = leads.id and o.action = 'heyreach_enrolled') as hr_done, exists(select 1 from outreach_events o where o.lead_id = leads.id and o.action = 'instantly_enrolled') as in_done\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0955d20d-7167-5b79-99a5-b8f78a73e261",
+      "name": "No answer: claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7150b6e8-5bed-5ee7-8ca2-6531905b9775",
+              "leftValue": "={{ Boolean($json.id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "43d813fa-823d-511a-bf75-2143cbd0d0b3",
+      "name": "No answer: already handled",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postEphemeral' }}",
+            "payload": "={{ ({ channel: $('Parse Slack payload').first().json.channel, user: $('Parse Slack payload').first().json.user_id, text: 'Already handled: this lead is already sequenced. Nothing changed.' }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "bbc718c4-2d6f-58f8-88a2-7090871d7513",
+      "name": "No answer: log call",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1780,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into call_logs (lead_id, sdr_slack_id, outcome) values ($1::uuid, $2, 'no_answer') returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('No answer: claim').first().json.id, $('Parse Slack payload').first().json.user_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "b8f01a78-cf06-5bb1-bda8-e1e68b529531",
+      "name": "HeyReach needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2020,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e3ac5851-67fe-5e0c-b014-fb86d2b59da5",
+              "leftValue": "={{ !$('No answer: claim').first().json.hr_done }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "9337b9d9-fd9d-52db-a7b9-09e25d386446",
+      "name": "HeyReach: no-answer campaign",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2260,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.HEYREACH_API_BASE || 'https://api.heyreach.io/api/public') + '/campaign/AddLeadsToCampaignV2' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ campaignId: Number($env.HEYREACH_NOANSWER_CAMPAIGN_ID), accountLeadPairs: [{ linkedInAccountId: Number($env.HEYREACH_LINKEDIN_ACCOUNT_ID), lead: { firstName: $('No answer: claim').first().json.first_name || '', lastName: $('No answer: claim').first().json.last_name || '', profileUrl: $('No answer: claim').first().json.linkedin_url, companyName: $('No answer: claim').first().json.company_name || '', position: $('No answer: claim').first().json.title || '', emailAddress: $('No answer: claim').first().json.work_email || '', customUserFields: [{ name: 'talking_point', value: (String($('No answer: claim').first().json.talking_points || '').split('\\n')[0].replace(/^[•*-]\\s*/, '').trim() || ($('No answer: claim').first().json.title ? 'your work as ' + $('No answer: claim').first().json.title : 'your role')) }] } }] }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHeyreach00001",
+          "name": "HeyReach API Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "d5304140-5f83-53c2-a375-6947125f6c65",
+      "name": "Record HeyReach enrolment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2500,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into outreach_events (lead_id, channel, action, external_id) values ($1::uuid, 'linkedin', 'heyreach_enrolled', $2) on conflict do nothing returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('No answer: claim').first().json.id, String($env.HEYREACH_NOANSWER_CAMPAIGN_ID)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "dc4f31bd-570c-5506-b249-85ee40aeda6c",
+      "name": "Valid email, not enrolled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2740,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5a913710-04ed-5060-b74e-3adfc69e665c",
+              "leftValue": "={{ ['valid', 'deliverable', 'verified'].includes(String($('No answer: claim').first().json.email_status).toLowerCase()) && !$('No answer: claim').first().json.in_done }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "bd944651-2d9f-5d7d-bcde-897ee2016b5e",
+      "name": "Instantly: create lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2980,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.INSTANTLY_API_BASE || 'https://api.instantly.ai/api/v2') + '/leads' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ campaign: $env.INSTANTLY_CAMPAIGN_ID, email: $('No answer: claim').first().json.work_email, first_name: $('No answer: claim').first().json.first_name, last_name: $('No answer: claim').first().json.last_name, company_name: $('No answer: claim').first().json.company_name, personalization: (String($('No answer: claim').first().json.talking_points || '').split('\\n')[0].replace(/^[•*-]\\s*/, '').trim() || ($('No answer: claim').first().json.title ? 'your work as ' + $('No answer: claim').first().json.title : 'your role')), custom_variables: { talking_point: (String($('No answer: claim').first().json.talking_points || '').split('\\n')[0].replace(/^[•*-]\\s*/, '').trim() || ($('No answer: claim').first().json.title ? 'your work as ' + $('No answer: claim').first().json.title : 'your role')), linkedin_url: $('No answer: claim').first().json.linkedin_url } }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrInstantly0001",
+          "name": "Instantly API v2"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "b7edcffa-9c13-5fab-baae-57ea9c45d4b7",
+      "name": "Record Instantly enrolment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3220,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into outreach_events (lead_id, channel, action, external_id) values ($1::uuid, 'email', 'instantly_enrolled', $2) on conflict do nothing returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('No answer: claim').first().json.id, $json.id ?? $env.INSTANTLY_CAMPAIGN_ID] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "2147874b-9549-5352-a227-540b33902546",
+      "name": "Record email skipped",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3460,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into outreach_events (lead_id, channel, action, message) values ($1::uuid, 'email', 'email_skipped', $2) returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('No answer: claim').first().json.id, $('No answer: claim').first().json.in_done ? 'already enrolled in Instantly' : 'no valid email (status: ' + ($('No answer: claim').first().json.email_status || 'none') + ')'] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "34c10847-9205-51f8-adb2-79761beef0c1",
+      "name": "Mark sequenced",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3460,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'sequenced' where id = $1::uuid returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('No answer: claim').first().json.id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "36f67068-1f51-525a-af72-afcb85eeb2af",
+      "name": "HubSpot: log no-answer call",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3700,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubHsCall0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('No answer: claim').first().json.id }}",
+            "disposition": "={{ 'no_answer' }}",
+            "title": "={{ 'Call: no answer' }}",
+            "body": "={{ 'Enrolled in HeyReach' + ($('Instantly: create lead').isExecuted ? ' and Instantly' : '') + ' follow-up by the SDR Agent.' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "disposition",
+              "displayName": "disposition",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "body",
+              "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "dae817da-e390-59a6-9851-03def73ac324",
+      "name": "Update card: no answer",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3940,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubLeadCard01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('No answer: claim').first().json.id }}",
+            "mode": "={{ 'update' }}",
+            "note": "={{ ':telephone_receiver: *No answer*: enrolled in LinkedIn' + ($('Instantly: create lead').isExecuted ? ' and email' : '') + ' sequences by <@' + $('Parse Slack payload').first().json.user_id + '> at ' + $now.setZone($env.TZ || 'UTC').toFormat('HH:mm') + '.' + ($('Instantly: create lead').isExecuted ? '' : ' Email skipped: ' + ($('No answer: claim').first().json.in_done ? 'already enrolled.' : 'no valid email.')) + ' Finding more people at ' + ($('No answer: claim').first().json.company_name || 'the company') + '…' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mode",
+              "displayName": "mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "note",
+              "displayName": "note",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "ccfd7b4c-73e3-5e4c-82e9-99bdb9ed3ed9",
+      "name": "Start expansion (no answer)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        4180,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubExpStart01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('No answer: claim').first().json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "4c16a76a-8bc1-52e3-a5a9-1ba4d897ae19",
+      "name": "Report error",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        4020,
+        400
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubReportErr1",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "workflow": "={{ 'SDR · WF3 Actions (buttons + modals)' }}",
+            "step": "={{ $prevNode.name }}",
+            "lead_id": "={{ $('Parse Slack payload').first().json.lead_id }}",
+            "error": "={{ JSON.stringify($json.error ?? $json).slice(0, 2000) }}",
+            "mark_lead": "={{ true }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "workflow",
+              "displayName": "workflow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mark_lead",
+              "displayName": "mark_lead",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "dd65d547-9ee7-537e-8da1-e62d0c71e5b0",
+      "name": "Build call-notes modal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        220
+      ],
+      "parameters": {
+        "jsCode": "// Build the views.open payload for the call-notes modal or the edit-draft modal.\n// Runs right after parsing so the 3-second trigger_id window is respected.\nconst item = $input.first().json;\nconst action = $('Parse Slack payload').first().json;\nconst opt = (text, value) => ({ text: { type: 'plain_text', text }, value });\n\nconst meta = JSON.stringify({\n  lead_id: action.lead_id,\n  channel: action.channel,\n  message_ts: action.message_ts,\n});\n\nlet view;\nif (action.action === 'call_connected') {\n  view = {\n    type: 'modal',\n    callback_id: 'call_notes_submit',\n    private_metadata: meta,\n    title: { type: 'plain_text', text: 'Call notes' },\n    submit: { type: 'plain_text', text: 'Save & draft' },\n    close: { type: 'plain_text', text: 'Cancel' },\n    blocks: [\n      { type: 'input', block_id: 'result', label: { type: 'plain_text', text: 'Call outcome' },\n        element: { type: 'static_select', action_id: 'call_result', initial_option: opt('Interested, follow up', 'interested'),\n          options: [opt('Meeting booked', 'meeting_booked'), opt('Interested, follow up', 'interested'),\n            opt('Not now', 'not_now'), opt('Not interested', 'not_interested')] } },\n      { type: 'input', block_id: 'notes', label: { type: 'plain_text', text: 'Call notes' },\n        element: { type: 'plain_text_input', action_id: 'call_notes', multiline: true,\n          placeholder: { type: 'plain_text', text: 'What did they say? Pains, timing, next step…' } } },\n      { type: 'input', block_id: 'goal', label: { type: 'plain_text', text: 'Message goal' },\n        element: { type: 'static_select', action_id: 'message_goal', initial_option: opt('Recap and meeting confirmation', 'recap_and_meeting_confirmation'),\n          options: [opt('Recap and meeting confirmation', 'recap_and_meeting_confirmation'),\n            opt('Share a resource', 'share_a_resource'), opt('Soft follow-up', 'soft_follow_up')] } },\n    ],\n  };\n} else {\n  view = {\n    type: 'modal',\n    callback_id: 'edit_message_submit',\n    private_metadata: meta,\n    title: { type: 'plain_text', text: 'Edit message' },\n    submit: { type: 'plain_text', text: 'Save draft' },\n    close: { type: 'plain_text', text: 'Cancel' },\n    blocks: [\n      { type: 'input', block_id: 'draft', label: { type: 'plain_text', text: 'LinkedIn message' },\n        element: { type: 'plain_text_input', action_id: 'draft_text', multiline: true, max_length: 3000,\n          initial_value: String(item.draft || '') } },\n    ],\n  };\n}\n\nreturn [{ json: { payload: { trigger_id: action.trigger_id, view } } }];\n"
+      }
+    },
+    {
+      "id": "3a33ffa6-74f8-51c1-9d0d-473009e7351d",
+      "name": "Open call-notes modal",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1540,
+        220
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'views.open' }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "05853e0f-9b3c-50df-9868-96a17548831a",
+      "name": "Wrong person: claim",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        440
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'disqualified' where id = $1::uuid and status in ('in_crm', 'enriched') returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "26eef059-33f0-59bf-b161-162bf498f45b",
+      "name": "Wrong person: claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        440
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1c0b1489-4c8d-5e37-b64a-f66880539864",
+              "leftValue": "={{ Boolean($json.id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "a88d07dc-2483-56e1-bec4-f3c5350041aa",
+      "name": "Wrong person: already handled",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        440
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postEphemeral' }}",
+            "payload": "={{ ({ channel: $('Parse Slack payload').first().json.channel, user: $('Parse Slack payload').first().json.user_id, text: 'Already handled. Nothing changed.' }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0c8aa088-bc82-50c1-8fe2-7e8a237c0629",
+      "name": "Wrong person: log call",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2020,
+        440
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into call_logs (lead_id, sdr_slack_id, outcome) values ($1::uuid, $2, 'wrong_person') returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Wrong person: claim').first().json.id, $('Parse Slack payload').first().json.user_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "3f50b26c-5a19-54ba-ad88-1c98f6563d57",
+      "name": "HubSpot: log wrong person",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2260,
+        440
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubHsCall0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Wrong person: claim').first().json.id }}",
+            "disposition": "={{ 'wrong_number' }}",
+            "title": "={{ 'Call: wrong person' }}",
+            "body": "={{ 'SDR flagged this as the wrong person. Lead disqualified; searching the account for the right person.' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "disposition",
+              "displayName": "disposition",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "body",
+              "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "086cbf7f-e1f1-5bbb-9e08-e8d3fefbd690",
+      "name": "Update card: wrong person",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2500,
+        440
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubLeadCard01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Wrong person: claim').first().json.id }}",
+            "mode": "={{ 'update' }}",
+            "note": "={{ ':no_entry: *Wrong person*, flagged by <@' + $('Parse Slack payload').first().json.user_id + '> at ' + $now.setZone($env.TZ || 'UTC').toFormat('HH:mm') + '. Finding the right person at ' + ($('Wrong person: claim').first().json.company_name || 'the company') + '…' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mode",
+              "displayName": "mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "note",
+              "displayName": "note",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "2ac9d42a-7955-5aff-a5fb-5bf9b85ca2d0",
+      "name": "Start expansion (wrong person)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2740,
+        440
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubExpStart01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Wrong person: claim').first().json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "1546fa79-ba72-582e-9eaf-8d5d3779b8b6",
+      "name": "Notes: claim",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        660
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'called_connected' where id = $1::uuid and status in ('in_crm', 'enriched') returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "cc31a25e-b47d-5bf3-bea0-07280c4cf585",
+      "name": "Notes: claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d1a8ba7f-a886-5d41-9251-43b49657f75f",
+              "leftValue": "={{ Boolean($json.id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "f33bbdce-5c1a-5b63-8a2d-4d786f35496c",
+      "name": "Notes: already logged",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        660
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postEphemeral' }}",
+            "payload": "={{ ({ channel: $('Parse Slack payload').first().json.channel, user: $('Parse Slack payload').first().json.user_id, text: 'This call was already logged. Nothing changed.' }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "63670bd0-c472-5d31-9cbb-20a4190c1385",
+      "name": "Notes: log call",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2020,
+        660
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into call_logs (lead_id, sdr_slack_id, outcome, call_result, message_goal, notes) values ($1::uuid, $2, 'connected', $3, $4, $5) returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Notes: claim').first().json.id, $('Parse Slack payload').first().json.user_id ?? null, $('Parse Slack payload').first().json.values.call_result ?? null, $('Parse Slack payload').first().json.values.message_goal ?? null, $('Parse Slack payload').first().json.values.call_notes ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "b241daee-80d9-5a75-bdf7-37a756ba5ab8",
+      "name": "HubSpot: log connected call",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2260,
+        660
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubHsCall0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Notes: claim').first().json.id }}",
+            "disposition": "={{ 'connected' }}",
+            "title": "={{ 'Call: connected (' + String($('Parse Slack payload').first().json.values.call_result || '').replace(/_/g, ' ') + ')' }}",
+            "body": "={{ $('Parse Slack payload').first().json.values.call_notes || '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "disposition",
+              "displayName": "disposition",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "body",
+              "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "70ec3b61-dfbe-5caf-bc3a-0ae6cceb9c15",
+      "name": "Update card: connected",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2500,
+        660
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubLeadCard01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Notes: claim').first().json.id }}",
+            "mode": "={{ 'update' }}",
+            "note": "={{ ':white_check_mark: *Picked up* (' + String($('Parse Slack payload').first().json.values.call_result || '').replace(/_/g, ' ') + '), notes logged by <@' + $('Parse Slack payload').first().json.user_id + '> at ' + $now.setZone($env.TZ || 'UTC').toFormat('HH:mm') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mode",
+              "displayName": "mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "note",
+              "displayName": "note",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0e1a21ec-5e57-5b8b-9010-e5f6d6f2adaa",
+      "name": "Draft a message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2740,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5c94b949-b037-5343-a35c-c4a3b1c69940",
+              "leftValue": "={{ $('Parse Slack payload').first().json.values.call_result !== 'not_interested' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "1472174f-e5b7-5eb5-a037-e2f3b44ea276",
+      "name": "AI draft (sub)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2980,
+        660
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubDraft00001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Notes: claim').first().json.id }}",
+            "notes": "={{ $('Parse Slack payload').first().json.values.call_notes || '' }}",
+            "goal": "={{ $('Parse Slack payload').first().json.values.message_goal || '' }}",
+            "sdr_name": "={{ $('Parse Slack payload').first().json.user_name || '' }}",
+            "previous_draft": "={{ '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "notes",
+              "displayName": "notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "goal",
+              "displayName": "goal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "sdr_name",
+              "displayName": "sdr_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "previous_draft",
+              "displayName": "previous_draft",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "8207ccdc-a724-50ef-89d8-06a53ea61f7e",
+      "name": "Notes: prep draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3220,
+        660
+      ],
+      "parameters": {
+        "jsCode": "const src = $('AI draft (sub)').first().json;\nreturn [{ json: { lead_id: src.lead_id, draft: src.draft, channel: $('Notes: claim').first().json.slack_channel_id, thread_ts: $('Notes: claim').first().json.slack_thread_ts } }];"
+      }
+    },
+    {
+      "id": "0ba62e4e-3d4a-50df-8bfb-5dd53b24250c",
+      "name": "Notes: draft blocks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3460,
+        660
+      ],
+      "parameters": {
+        "jsCode": "// Render the AI draft message with Send / Edit / Regenerate / Copy buttons.\n// Input item: { lead_id, draft, channel, thread_ts?, message_ts? } — message_ts means update in place.\nconst item = $input.first().json;\nconst MAX_LINKEDIN_NOTE = 300;\nconst draft = String(item.draft || '').trim();\nconst length = draft.length;\nconst lengthNote = length > MAX_LINKEDIN_NOTE\n  ? `:warning: ${length} chars, over the ${MAX_LINKEDIN_NOTE}-char connection-note limit; edit before sending`\n  : `${length}/${MAX_LINKEDIN_NOTE} chars`;\n\nconst blocks = [\n  { type: 'section', text: { type: 'mrkdwn', text: '*AI draft LinkedIn message* (nothing is sent until you click Send)' } },\n  { type: 'section', text: { type: 'mrkdwn', text: '>' + draft.replace(/\\n/g, '\\n>') } },\n  { type: 'context', elements: [{ type: 'mrkdwn', text: lengthNote }] },\n  { type: 'actions', elements: [\n    { type: 'button', action_id: 'send_message', style: 'primary', text: { type: 'plain_text', text: 'Send via HeyReach' }, value: item.lead_id },\n    { type: 'button', action_id: 'edit_message', text: { type: 'plain_text', text: 'Edit' }, value: item.lead_id },\n    { type: 'button', action_id: 'regenerate_message', text: { type: 'plain_text', text: 'Regenerate' }, value: item.lead_id },\n    { type: 'button', action_id: 'copy_message', text: { type: 'plain_text', text: \"Copy, I'll send it\" }, value: item.lead_id },\n  ] },\n];\n\nconst payload = { channel: item.channel, text: 'AI draft LinkedIn message', blocks };\nif (item.message_ts) payload.ts = item.message_ts;\nelse payload.thread_ts = item.thread_ts;\n\nreturn [{ json: { ...item, method: item.message_ts ? 'chat.update' : 'chat.postMessage', payload } }];\n"
+      }
+    },
+    {
+      "id": "bfbe30e2-da28-587a-be0b-1d04ac463f72",
+      "name": "Notes: post draft",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3700,
+        660
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ $json.method }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "83d9ecb1-2296-5002-86d9-b9140f535210",
+      "name": "Record draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3940,
+        660
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with e as (insert into outreach_events (lead_id, channel, action, message, external_id) values ($1::uuid, 'linkedin', 'message_drafted', $2, $3) returning id), u as (update leads set status = 'message_drafted' where id = $1::uuid returning *) select * from u",
+        "options": {
+          "queryReplacement": "={{ [$('Notes: claim').first().json.id, $('AI draft (sub)').first().json.draft, $json.ts ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "abe5e4a3-16a6-51ba-b5c3-675761a775af",
+      "name": "Send: claim",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        880
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'message_sent' where id = $1::uuid and status in ('message_drafted') returning *, (select message from outreach_events o where o.lead_id = leads.id and o.action = 'message_drafted' order by o.created_at desc limit 1) as draft\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "177d0299-392e-5465-b045-8c067cb43bbf",
+      "name": "Send: claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        880
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3ddaf615-e56a-5713-bef2-edd83a79f47c",
+              "leftValue": "={{ Boolean($json.id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "9f72364d-5ba5-5f9c-8dee-59bca378641b",
+      "name": "Send: already sent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        880
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postEphemeral' }}",
+            "payload": "={{ ({ channel: $('Parse Slack payload').first().json.channel, user: $('Parse Slack payload').first().json.user_id, text: 'This message was already sent. Nothing changed.' }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "cf6a75c8-15ea-5b2f-9775-5c20e02d723d",
+      "name": "Send: record sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2020,
+        880
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into outreach_events (lead_id, channel, action, message, external_id) values ($1::uuid, 'linkedin', 'message_sent', $2, $3) returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Send: claim').first().json.id, $('Send: claim').first().json.draft ?? '', String($env.HEYREACH_POSTCALL_CAMPAIGN_ID)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "deae7685-af96-538f-8c6e-49e660638bf2",
+      "name": "Send: update draft message",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2260,
+        880
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.update' }}",
+            "payload": "={{ ({ channel: $('Parse Slack payload').first().json.channel, ts: $('Parse Slack payload').first().json.message_ts, text: 'Message sent', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':white_check_mark: *Sent via HeyReach* by <@' + $('Parse Slack payload').first().json.user_id + '> at ' + $now.setZone($env.TZ || 'UTC').toFormat('HH:mm') } }, { type: 'section', text: { type: 'mrkdwn', text: '```' + $('Send: claim').first().json.draft + '```' } } ] }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "5edf766f-2fbb-5160-86a7-fd07d34683db",
+      "name": "Send: HubSpot note",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2500,
+        880
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubHsNote0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Send: claim').first().json.id }}",
+            "body": "={{ 'LinkedIn message sent via HeyReach:\\n' + ($('Send: claim').first().json.draft || '') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "body",
+              "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "6708006e-40bc-5c8d-a218-1917dd4d9548",
+      "name": "Send: HeyReach post-call campaign",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2740,
+        880
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.HEYREACH_API_BASE || 'https://api.heyreach.io/api/public') + '/campaign/AddLeadsToCampaignV2' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ campaignId: Number($env.HEYREACH_POSTCALL_CAMPAIGN_ID), accountLeadPairs: [{ linkedInAccountId: Number($env.HEYREACH_LINKEDIN_ACCOUNT_ID), lead: { firstName: $('Send: claim').first().json.first_name || '', lastName: $('Send: claim').first().json.last_name || '', profileUrl: $('Send: claim').first().json.linkedin_url, companyName: $('Send: claim').first().json.company_name || '', position: $('Send: claim').first().json.title || '', customUserFields: [{ name: 'custom_message', value: $('Send: claim').first().json.draft || '' }] } }] }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHeyreach00001",
+          "name": "HeyReach API Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "0c18e6d3-46f8-5e9a-ae1f-6a73607d90fc",
+      "name": "Edit: load draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        1100
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select leads.id as lead_id, (select message from outreach_events o where o.lead_id = leads.id and o.action = 'message_drafted' order by o.created_at desc limit 1) as draft from leads where leads.id = $1::uuid and leads.status = 'message_drafted'",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "5932dd88-4444-5a70-bb44-95a0de487323",
+      "name": "Build edit modal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        1100
+      ],
+      "parameters": {
+        "jsCode": "// Build the views.open payload for the call-notes modal or the edit-draft modal.\n// Runs right after parsing so the 3-second trigger_id window is respected.\nconst item = $input.first().json;\nconst action = $('Parse Slack payload').first().json;\nconst opt = (text, value) => ({ text: { type: 'plain_text', text }, value });\n\nconst meta = JSON.stringify({\n  lead_id: action.lead_id,\n  channel: action.channel,\n  message_ts: action.message_ts,\n});\n\nlet view;\nif (action.action === 'call_connected') {\n  view = {\n    type: 'modal',\n    callback_id: 'call_notes_submit',\n    private_metadata: meta,\n    title: { type: 'plain_text', text: 'Call notes' },\n    submit: { type: 'plain_text', text: 'Save & draft' },\n    close: { type: 'plain_text', text: 'Cancel' },\n    blocks: [\n      { type: 'input', block_id: 'result', label: { type: 'plain_text', text: 'Call outcome' },\n        element: { type: 'static_select', action_id: 'call_result', initial_option: opt('Interested, follow up', 'interested'),\n          options: [opt('Meeting booked', 'meeting_booked'), opt('Interested, follow up', 'interested'),\n            opt('Not now', 'not_now'), opt('Not interested', 'not_interested')] } },\n      { type: 'input', block_id: 'notes', label: { type: 'plain_text', text: 'Call notes' },\n        element: { type: 'plain_text_input', action_id: 'call_notes', multiline: true,\n          placeholder: { type: 'plain_text', text: 'What did they say? Pains, timing, next step…' } } },\n      { type: 'input', block_id: 'goal', label: { type: 'plain_text', text: 'Message goal' },\n        element: { type: 'static_select', action_id: 'message_goal', initial_option: opt('Recap and meeting confirmation', 'recap_and_meeting_confirmation'),\n          options: [opt('Recap and meeting confirmation', 'recap_and_meeting_confirmation'),\n            opt('Share a resource', 'share_a_resource'), opt('Soft follow-up', 'soft_follow_up')] } },\n    ],\n  };\n} else {\n  view = {\n    type: 'modal',\n    callback_id: 'edit_message_submit',\n    private_metadata: meta,\n    title: { type: 'plain_text', text: 'Edit message' },\n    submit: { type: 'plain_text', text: 'Save draft' },\n    close: { type: 'plain_text', text: 'Cancel' },\n    blocks: [\n      { type: 'input', block_id: 'draft', label: { type: 'plain_text', text: 'LinkedIn message' },\n        element: { type: 'plain_text_input', action_id: 'draft_text', multiline: true, max_length: 3000,\n          initial_value: String(item.draft || '') } },\n    ],\n  };\n}\n\nreturn [{ json: { payload: { trigger_id: action.trigger_id, view } } }];\n"
+      }
+    },
+    {
+      "id": "b1630679-d6ae-586f-b3fa-98149a62a16e",
+      "name": "Open edit modal",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        1100
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'views.open' }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "d703379d-0ff1-5711-a08f-4c5507974806",
+      "name": "Edit: save draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        1320
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into outreach_events (lead_id, channel, action, message, external_id) select id, 'linkedin', 'message_drafted', $2, 'edited' from leads where id = $1::uuid and status = 'message_drafted' returning lead_id, message as draft\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id, $('Parse Slack payload').first().json.values.draft_text ?? ''] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "1dea603b-984a-54a9-8b38-d0d05dc243dc",
+      "name": "Edit: prep draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        1320
+      ],
+      "parameters": {
+        "jsCode": "const src = $json;\nreturn [{ json: { lead_id: src.lead_id, draft: src.draft, channel: $('Parse Slack payload').first().json.channel, message_ts: $('Parse Slack payload').first().json.message_ts } }];"
+      }
+    },
+    {
+      "id": "1fc3213c-a784-5d91-89b3-1f58b6d6c1c0",
+      "name": "Edit: draft blocks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        1320
+      ],
+      "parameters": {
+        "jsCode": "// Render the AI draft message with Send / Edit / Regenerate / Copy buttons.\n// Input item: { lead_id, draft, channel, thread_ts?, message_ts? } — message_ts means update in place.\nconst item = $input.first().json;\nconst MAX_LINKEDIN_NOTE = 300;\nconst draft = String(item.draft || '').trim();\nconst length = draft.length;\nconst lengthNote = length > MAX_LINKEDIN_NOTE\n  ? `:warning: ${length} chars, over the ${MAX_LINKEDIN_NOTE}-char connection-note limit; edit before sending`\n  : `${length}/${MAX_LINKEDIN_NOTE} chars`;\n\nconst blocks = [\n  { type: 'section', text: { type: 'mrkdwn', text: '*AI draft LinkedIn message* (nothing is sent until you click Send)' } },\n  { type: 'section', text: { type: 'mrkdwn', text: '>' + draft.replace(/\\n/g, '\\n>') } },\n  { type: 'context', elements: [{ type: 'mrkdwn', text: lengthNote }] },\n  { type: 'actions', elements: [\n    { type: 'button', action_id: 'send_message', style: 'primary', text: { type: 'plain_text', text: 'Send via HeyReach' }, value: item.lead_id },\n    { type: 'button', action_id: 'edit_message', text: { type: 'plain_text', text: 'Edit' }, value: item.lead_id },\n    { type: 'button', action_id: 'regenerate_message', text: { type: 'plain_text', text: 'Regenerate' }, value: item.lead_id },\n    { type: 'button', action_id: 'copy_message', text: { type: 'plain_text', text: \"Copy, I'll send it\" }, value: item.lead_id },\n  ] },\n];\n\nconst payload = { channel: item.channel, text: 'AI draft LinkedIn message', blocks };\nif (item.message_ts) payload.ts = item.message_ts;\nelse payload.thread_ts = item.thread_ts;\n\nreturn [{ json: { ...item, method: item.message_ts ? 'chat.update' : 'chat.postMessage', payload } }];\n"
+      }
+    },
+    {
+      "id": "d183f8a7-fd25-5f4f-88df-dbf131d039e5",
+      "name": "Edit: post draft",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2020,
+        1320
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ $json.method }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "83d469fe-8987-5e73-a326-5666eb197d77",
+      "name": "Regenerate: load",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        1540
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select leads.id as lead_id, (select message from outreach_events o where o.lead_id = leads.id and o.action = 'message_drafted' order by o.created_at desc limit 1) as draft, c.notes, c.message_goal from leads left join lateral (select notes, message_goal from call_logs where lead_id = leads.id and outcome = 'connected' order by created_at desc limit 1) c on true where leads.id = $1::uuid and leads.status = 'message_drafted'",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "76cfbf72-27f1-595c-85c7-c96b6385f63b",
+      "name": "AI redraft (sub)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1540,
+        1540
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubDraft00001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $json.lead_id }}",
+            "notes": "={{ $json.notes || '' }}",
+            "goal": "={{ $json.message_goal || '' }}",
+            "sdr_name": "={{ $('Parse Slack payload').first().json.user_name || '' }}",
+            "previous_draft": "={{ $json.draft || '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "notes",
+              "displayName": "notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "goal",
+              "displayName": "goal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "sdr_name",
+              "displayName": "sdr_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "previous_draft",
+              "displayName": "previous_draft",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "18833b7c-50df-5335-93a4-70111a73dc6c",
+      "name": "Regenerate: record draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1780,
+        1540
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into outreach_events (lead_id, channel, action, message, external_id) values ($1::uuid, 'linkedin', 'message_drafted', $2, 'regenerated') returning lead_id, message as draft\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id, $json.draft] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "f88b3894-aa24-5c95-bac5-4e3e3c4204b2",
+      "name": "Regenerate: prep draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        1540
+      ],
+      "parameters": {
+        "jsCode": "const src = $json;\nreturn [{ json: { lead_id: src.lead_id, draft: src.draft, channel: $('Parse Slack payload').first().json.channel, message_ts: $('Parse Slack payload').first().json.message_ts } }];"
+      }
+    },
+    {
+      "id": "83121d32-b6c0-594e-a050-7ba458aa6f30",
+      "name": "Regenerate: draft blocks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2260,
+        1540
+      ],
+      "parameters": {
+        "jsCode": "// Render the AI draft message with Send / Edit / Regenerate / Copy buttons.\n// Input item: { lead_id, draft, channel, thread_ts?, message_ts? } — message_ts means update in place.\nconst item = $input.first().json;\nconst MAX_LINKEDIN_NOTE = 300;\nconst draft = String(item.draft || '').trim();\nconst length = draft.length;\nconst lengthNote = length > MAX_LINKEDIN_NOTE\n  ? `:warning: ${length} chars, over the ${MAX_LINKEDIN_NOTE}-char connection-note limit; edit before sending`\n  : `${length}/${MAX_LINKEDIN_NOTE} chars`;\n\nconst blocks = [\n  { type: 'section', text: { type: 'mrkdwn', text: '*AI draft LinkedIn message* (nothing is sent until you click Send)' } },\n  { type: 'section', text: { type: 'mrkdwn', text: '>' + draft.replace(/\\n/g, '\\n>') } },\n  { type: 'context', elements: [{ type: 'mrkdwn', text: lengthNote }] },\n  { type: 'actions', elements: [\n    { type: 'button', action_id: 'send_message', style: 'primary', text: { type: 'plain_text', text: 'Send via HeyReach' }, value: item.lead_id },\n    { type: 'button', action_id: 'edit_message', text: { type: 'plain_text', text: 'Edit' }, value: item.lead_id },\n    { type: 'button', action_id: 'regenerate_message', text: { type: 'plain_text', text: 'Regenerate' }, value: item.lead_id },\n    { type: 'button', action_id: 'copy_message', text: { type: 'plain_text', text: \"Copy, I'll send it\" }, value: item.lead_id },\n  ] },\n];\n\nconst payload = { channel: item.channel, text: 'AI draft LinkedIn message', blocks };\nif (item.message_ts) payload.ts = item.message_ts;\nelse payload.thread_ts = item.thread_ts;\n\nreturn [{ json: { ...item, method: item.message_ts ? 'chat.update' : 'chat.postMessage', payload } }];\n"
+      }
+    },
+    {
+      "id": "63274698-a880-577b-8bfd-965d37f14442",
+      "name": "Regenerate: post draft",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2500,
+        1540
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ $json.method }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "d0e0e32b-d629-5104-b97f-de0925de24be",
+      "name": "Copy: claim",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        1760
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'message_sent' where id = $1::uuid and status in ('message_drafted') returning *, (select message from outreach_events o where o.lead_id = leads.id and o.action = 'message_drafted' order by o.created_at desc limit 1) as draft\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "d5c209bd-5597-5bb2-b235-ab0756288efd",
+      "name": "Copy: claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        1760
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "57bfdc1a-877b-5a84-bae8-8702b85edfe3",
+              "leftValue": "={{ Boolean($json.id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "96ac5d84-bf2a-50c0-98f9-3061b9fea026",
+      "name": "Copy: already sent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        1760
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postEphemeral' }}",
+            "payload": "={{ ({ channel: $('Parse Slack payload').first().json.channel, user: $('Parse Slack payload').first().json.user_id, text: 'This message was already sent. Nothing changed.' }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "849226d0-d245-57a8-adc1-f8b0cb50d656",
+      "name": "Copy: record sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2020,
+        1760
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\ninsert into outreach_events (lead_id, channel, action, message, external_id) values ($1::uuid, 'linkedin', 'message_sent', $2, $3) returning lead_id\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Copy: claim').first().json.id, $('Copy: claim').first().json.draft ?? '', 'manual'] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "e7c55c1c-b99e-587c-86e1-f7e096e67638",
+      "name": "Copy: update draft message",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2260,
+        1760
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.update' }}",
+            "payload": "={{ ({ channel: $('Parse Slack payload').first().json.channel, ts: $('Parse Slack payload').first().json.message_ts, text: 'Message sent', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':clipboard: *Marked as sent manually* by <@' + $('Parse Slack payload').first().json.user_id + '> at ' + $now.setZone($env.TZ || 'UTC').toFormat('HH:mm') } }, { type: 'section', text: { type: 'mrkdwn', text: '```' + $('Copy: claim').first().json.draft + '```' } } ] }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "fab88c9e-84c0-5254-86e6-93fb561e8ba3",
+      "name": "Copy: HubSpot note",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2500,
+        1760
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubHsNote0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Copy: claim').first().json.id }}",
+            "body": "={{ 'LinkedIn message sent manually by SDR:\\n' + ($('Copy: claim').first().json.draft || '') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "body",
+              "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "d1a071ef-6aa7-5dcf-9c06-38ccaaa9104d",
+      "name": "Add: claim suggested",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        1980
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'received', sdr_slack_id = coalesce($2, sdr_slack_id) where id = $1::uuid and status = 'suggested' returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id, $('Parse Slack payload').first().json.user_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "85be0281-5213-56bc-9975-5aacadd0e381",
+      "name": "Add: refresh expansion card",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1540,
+        1980
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubExpCard001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.expansion_run_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "2cd48e4d-fd85-5450-a015-ca394de61fce",
+      "name": "Add: enrich (sub)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        1980
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubEnrich0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Add: claim suggested').first().json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "2eea0880-1bc2-5f58-bdab-7701f844c88e",
+      "name": "Skip: mark skipped",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        1980
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = 'skipped' where id = $1::uuid and status = 'suggested' returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "3485078c-d8d5-533b-940e-fdebf83cf948",
+      "name": "Skip: refresh expansion card",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1540,
+        1980
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubExpCard001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.expansion_run_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "05b9c6b1-dc13-5fbb-95be-741d83a4af70",
+      "name": "Retry: reset status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1300,
+        2200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set status = case\n  when enrichment is null then 'received'\n  when hubspot_contact_id is null then 'enriched'\n  when exists (select 1 from outreach_events o where o.lead_id = leads.id and o.action = 'message_drafted')\n   and not exists (select 1 from outreach_events o where o.lead_id = leads.id and o.action = 'message_sent') then 'message_drafted'\n  when exists (select 1 from outreach_events o where o.lead_id = leads.id and o.action = 'heyreach_enrolled') then 'sequenced'\n  else 'in_crm' end\nwhere id = $1::uuid and status = 'error'\nreturning *, (select message from outreach_events o where o.lead_id = leads.id and o.action = 'message_drafted'\n              order by o.created_at desc limit 1) as draft\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Parse Slack payload').first().json.lead_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "503624fb-85c6-5363-a611-528cc1297e7d",
+      "name": "Retry: route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1540,
+        2200
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 4,
+        "output": "={{ ({ received: 0, enriched: 1, message_drafted: 2 })[$json.status] ?? 3 }}"
+      }
+    },
+    {
+      "id": "b5af0b4d-af14-5d74-b6d0-6f905d770475",
+      "name": "Retry: re-enrich",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        2200
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubEnrich0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Retry: reset status').first().json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "9d36ab80-46d9-537e-91d3-b3cbb3171499",
+      "name": "Retry: HubSpot sync",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2020,
+        2200
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubHsSync0001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Retry: reset status').first().json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "16487814-aa6e-5c30-923a-23adc06d7583",
+      "name": "Retry: repost lead card",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2260,
+        2200
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubLeadCard01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $('Retry: reset status').first().json.id }}",
+            "mode": "={{ 'post' }}",
+            "note": "={{ '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mode",
+              "displayName": "mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "note",
+              "displayName": "note",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "7057a5b9-68e6-5a43-9ae2-7bc1683c1c38",
+      "name": "Retry: prep draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        2200
+      ],
+      "parameters": {
+        "jsCode": "const l = $('Retry: reset status').first().json;\nreturn [{ json: { lead_id: l.id, draft: l.draft, channel: l.slack_channel_id, thread_ts: l.slack_thread_ts } }];"
+      }
+    },
+    {
+      "id": "9482e398-7226-51ef-ad17-f668aa75f744",
+      "name": "Retry: draft blocks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2740,
+        2200
+      ],
+      "parameters": {
+        "jsCode": "// Render the AI draft message with Send / Edit / Regenerate / Copy buttons.\n// Input item: { lead_id, draft, channel, thread_ts?, message_ts? } — message_ts means update in place.\nconst item = $input.first().json;\nconst MAX_LINKEDIN_NOTE = 300;\nconst draft = String(item.draft || '').trim();\nconst length = draft.length;\nconst lengthNote = length > MAX_LINKEDIN_NOTE\n  ? `:warning: ${length} chars, over the ${MAX_LINKEDIN_NOTE}-char connection-note limit; edit before sending`\n  : `${length}/${MAX_LINKEDIN_NOTE} chars`;\n\nconst blocks = [\n  { type: 'section', text: { type: 'mrkdwn', text: '*AI draft LinkedIn message* (nothing is sent until you click Send)' } },\n  { type: 'section', text: { type: 'mrkdwn', text: '>' + draft.replace(/\\n/g, '\\n>') } },\n  { type: 'context', elements: [{ type: 'mrkdwn', text: lengthNote }] },\n  { type: 'actions', elements: [\n    { type: 'button', action_id: 'send_message', style: 'primary', text: { type: 'plain_text', text: 'Send via HeyReach' }, value: item.lead_id },\n    { type: 'button', action_id: 'edit_message', text: { type: 'plain_text', text: 'Edit' }, value: item.lead_id },\n    { type: 'button', action_id: 'regenerate_message', text: { type: 'plain_text', text: 'Regenerate' }, value: item.lead_id },\n    { type: 'button', action_id: 'copy_message', text: { type: 'plain_text', text: \"Copy, I'll send it\" }, value: item.lead_id },\n  ] },\n];\n\nconst payload = { channel: item.channel, text: 'AI draft LinkedIn message', blocks };\nif (item.message_ts) payload.ts = item.message_ts;\nelse payload.thread_ts = item.thread_ts;\n\nreturn [{ json: { ...item, method: item.message_ts ? 'chat.update' : 'chat.postMessage', payload } }];\n"
+      }
+    },
+    {
+      "id": "1ea32369-2de7-527b-bacc-161d2d47dda5",
+      "name": "Retry: repost draft",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2980,
+        2200
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ $json.method }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Slack interactivity": {
+      "main": [
+        [
+          {
+            "node": "Verify Slack signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Slack signature": {
+      "main": [
+        [
+          {
+            "node": "Valid signature?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid signature?": {
+      "main": [
+        [
+          {
+            "node": "Ack 200",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack 200": {
+      "main": [
+        [
+          {
+            "node": "Parse Slack payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Slack payload": {
+      "main": [
+        [
+          {
+            "node": "Route action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route action": {
+      "main": [
+        [
+          {
+            "node": "No answer: claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build call-notes modal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wrong person: claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notes: claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send: claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit: load draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit: save draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Regenerate: load",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Copy: claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Add: claim suggested",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip: mark skipped",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry: reset status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unknown action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No answer: claim": {
+      "main": [
+        [
+          {
+            "node": "No answer: claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No answer: claimed?": {
+      "main": [
+        [
+          {
+            "node": "No answer: log call",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No answer: already handled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No answer: log call": {
+      "main": [
+        [
+          {
+            "node": "HeyReach needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HeyReach needed?": {
+      "main": [
+        [
+          {
+            "node": "HeyReach: no-answer campaign",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Valid email, not enrolled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HeyReach: no-answer campaign": {
+      "main": [
+        [
+          {
+            "node": "Record HeyReach enrolment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record HeyReach enrolment": {
+      "main": [
+        [
+          {
+            "node": "Valid email, not enrolled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid email, not enrolled?": {
+      "main": [
+        [
+          {
+            "node": "Instantly: create lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record email skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instantly: create lead": {
+      "main": [
+        [
+          {
+            "node": "Record Instantly enrolment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Instantly enrolment": {
+      "main": [
+        [
+          {
+            "node": "Mark sequenced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record email skipped": {
+      "main": [
+        [
+          {
+            "node": "Mark sequenced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark sequenced": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: log no-answer call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: log no-answer call": {
+      "main": [
+        [
+          {
+            "node": "Update card: no answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update card: no answer": {
+      "main": [
+        [
+          {
+            "node": "Start expansion (no answer)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build call-notes modal": {
+      "main": [
+        [
+          {
+            "node": "Open call-notes modal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wrong person: claim": {
+      "main": [
+        [
+          {
+            "node": "Wrong person: claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wrong person: claimed?": {
+      "main": [
+        [
+          {
+            "node": "Wrong person: log call",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wrong person: already handled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wrong person: log call": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: log wrong person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: log wrong person": {
+      "main": [
+        [
+          {
+            "node": "Update card: wrong person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update card: wrong person": {
+      "main": [
+        [
+          {
+            "node": "Start expansion (wrong person)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notes: prep draft": {
+      "main": [
+        [
+          {
+            "node": "Notes: draft blocks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notes: draft blocks": {
+      "main": [
+        [
+          {
+            "node": "Notes: post draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notes: claim": {
+      "main": [
+        [
+          {
+            "node": "Notes: claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notes: claimed?": {
+      "main": [
+        [
+          {
+            "node": "Notes: log call",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notes: already logged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notes: log call": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: log connected call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: log connected call": {
+      "main": [
+        [
+          {
+            "node": "Update card: connected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update card: connected": {
+      "main": [
+        [
+          {
+            "node": "Draft a message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft a message?": {
+      "main": [
+        [
+          {
+            "node": "AI draft (sub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI draft (sub)": {
+      "main": [
+        [
+          {
+            "node": "Notes: prep draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notes: post draft": {
+      "main": [
+        [
+          {
+            "node": "Record draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send: claim": {
+      "main": [
+        [
+          {
+            "node": "Send: claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send: claimed?": {
+      "main": [
+        [
+          {
+            "node": "Send: HeyReach post-call campaign",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send: already sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send: HeyReach post-call campaign": {
+      "main": [
+        [
+          {
+            "node": "Send: record sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send: record sent": {
+      "main": [
+        [
+          {
+            "node": "Send: update draft message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send: update draft message": {
+      "main": [
+        [
+          {
+            "node": "Send: HubSpot note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit: load draft": {
+      "main": [
+        [
+          {
+            "node": "Build edit modal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build edit modal": {
+      "main": [
+        [
+          {
+            "node": "Open edit modal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit: prep draft": {
+      "main": [
+        [
+          {
+            "node": "Edit: draft blocks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit: draft blocks": {
+      "main": [
+        [
+          {
+            "node": "Edit: post draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit: save draft": {
+      "main": [
+        [
+          {
+            "node": "Edit: prep draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Regenerate: prep draft": {
+      "main": [
+        [
+          {
+            "node": "Regenerate: draft blocks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Regenerate: draft blocks": {
+      "main": [
+        [
+          {
+            "node": "Regenerate: post draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Regenerate: load": {
+      "main": [
+        [
+          {
+            "node": "AI redraft (sub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI redraft (sub)": {
+      "main": [
+        [
+          {
+            "node": "Regenerate: record draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Regenerate: record draft": {
+      "main": [
+        [
+          {
+            "node": "Regenerate: prep draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy: claim": {
+      "main": [
+        [
+          {
+            "node": "Copy: claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy: claimed?": {
+      "main": [
+        [
+          {
+            "node": "Copy: record sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Copy: already sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy: record sent": {
+      "main": [
+        [
+          {
+            "node": "Copy: update draft message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy: update draft message": {
+      "main": [
+        [
+          {
+            "node": "Copy: HubSpot note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add: claim suggested": {
+      "main": [
+        [
+          {
+            "node": "Add: refresh expansion card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add: refresh expansion card": {
+      "main": [
+        [
+          {
+            "node": "Add: enrich (sub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip: mark skipped": {
+      "main": [
+        [
+          {
+            "node": "Skip: refresh expansion card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry: reset status": {
+      "main": [
+        [
+          {
+            "node": "Retry: route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry: route": {
+      "main": [
+        [
+          {
+            "node": "Retry: re-enrich",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry: HubSpot sync",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry: prep draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry: repost lead card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry: HubSpot sync": {
+      "main": [
+        [
+          {
+            "node": "Retry: repost lead card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry: prep draft": {
+      "main": [
+        [
+          {
+            "node": "Retry: draft blocks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry: draft blocks": {
+      "main": [
+        [
+          {
+            "node": "Retry: repost draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

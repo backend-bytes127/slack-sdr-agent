@@ -1,0 +1,914 @@
+{
+  "id": "sdrSubHsSync0001",
+  "name": "SDR · sub · HubSpot company + contact sync",
+  "active": false,
+  "nodes": [
+    {
+      "id": "0af34ce4-e443-507a-9891-cb563eb73049",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "lead_id",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "f62c7888-3667-5c68-a104-6035e5ad4b37",
+      "name": "Load lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select l.*, m.hubspot_owner_id from leads l left join sdr_owner_map m on m.slack_user_id = l.sdr_slack_id where l.id = $1::uuid",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "d492fcc1-1533-57d1-a553-96960b53945f",
+      "name": "Search company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.HUBSPOT_API_BASE || 'https://api.hubapi.com') + '/crm/v3/objects/companies/search' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [ $json.company_domain ? { propertyName: 'domain', operator: 'EQ', value: $json.company_domain } : { propertyName: 'name', operator: 'EQ', value: $json.company_name || '__none__' } ] }], properties: ['name', 'domain'], limit: 1 }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHubspot000001",
+          "name": "HubSpot Private App"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "4edd328b-3d85-5ddd-892b-679be4adbcc3",
+      "name": "Company found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bca02dbd-422e-526d-b4df-45c87a28aa50",
+              "leftValue": "={{ ($json.results || []).length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "5eefc12d-4afd-52af-b1da-25ea0768334f",
+      "name": "Has company data?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9c6599a8-146f-5c79-b358-506849fb0a2d",
+              "leftValue": "={{ Boolean($('Load lead').first().json.company_name || $('Load lead').first().json.company_domain) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "a248b7da-6d8a-54d4-a320-406d8ffd6c5d",
+      "name": "Create company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.HUBSPOT_API_BASE || 'https://api.hubapi.com') + '/crm/v3/objects/companies' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: Object.fromEntries(Object.entries({ name: $('Load lead').first().json.company_name || $('Load lead').first().json.company_domain, domain: $('Load lead').first().json.company_domain, description: $('Load lead').first().json.company_description, linkedin_company_page: $('Load lead').first().json.company_linkedin_url }).filter(([k, v]) => v)) }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHubspot000001",
+          "name": "HubSpot Private App"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "db6d399b-c6de-59f4-8342-29787b56c5a0",
+      "name": "Company ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "let id = null;\nif ($('Search company').isExecuted) id = (($('Search company').first().json.results || [])[0] || {}).id || null;\nif (!id && $('Create company').isExecuted) id = $('Create company').first().json.id || null;\nreturn [{ json: { company_id: id } }];"
+      }
+    },
+    {
+      "id": "a4db6184-d9ce-5f2b-bf1a-e8e556a1812c",
+      "name": "Search contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.HUBSPOT_API_BASE || 'https://api.hubapi.com') + '/crm/v3/objects/contacts/search' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [ ...($('Load lead').first().json.work_email ? [{ filters: [{ propertyName: 'email', operator: 'EQ', value: $('Load lead').first().json.work_email }] }] : []), { filters: [{ propertyName: 'linkedin_url', operator: 'EQ', value: $('Load lead').first().json.linkedin_url }] } ], properties: ['email', 'hubspot_owner_id'], limit: 1 }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHubspot000001",
+          "name": "HubSpot Private App"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "bc895dc5-fa1b-58a2-bfb0-becbc41f08ee",
+      "name": "Plan contact upsert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Decide create vs update for the HubSpot contact and build its properties.\n// Never overwrites an existing owner; reports it so the SDR is warned instead.\nconst lead = $('Load lead').first().json;\nconst search = $('Search contact').first().json;\nconst existing = (search.results || [])[0] || null;\n\nconst props = {\n  firstname: lead.first_name,\n  lastname: lead.last_name,\n  jobtitle: lead.title,\n  company: lead.company_name,\n  phone: lead.phone,\n  city: lead.location,\n  linkedin_url: lead.linkedin_url,\n  linkedin_followers: lead.linkedin_followers,\n  linkedin_connections: lead.linkedin_connections,\n  research_summary: lead.research_summary,\n};\nif (lead.work_email) props.email = lead.work_email;\n\nconst existingOwner = existing && existing.properties ? existing.properties.hubspot_owner_id : null;\nif (lead.hubspot_owner_id && !existingOwner) props.hubspot_owner_id = lead.hubspot_owner_id;\n\nconst clean = Object.fromEntries(Object.entries(props).filter(([, v]) => v !== null && v !== undefined && v !== ''));\n\nreturn [{ json: {\n  exists: Boolean(existing),\n  contact_id: existing ? existing.id : null,\n  owner_conflict: Boolean(existingOwner && lead.hubspot_owner_id && existingOwner !== lead.hubspot_owner_id),\n  properties: clean,\n} }];\n"
+      }
+    },
+    {
+      "id": "26c6af8c-b2ab-58c5-b13e-738cfca69640",
+      "name": "Contact exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2160,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b2ef14d4-9e3b-54d5-8d5a-e4c2f111cdcf",
+              "leftValue": "={{ $json.exists }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "8dc8653f-a0e9-51d9-9797-1d7eb71ef423",
+      "name": "Update contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        0
+      ],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ ($env.HUBSPOT_API_BASE || 'https://api.hubapi.com') + '/crm/v3/objects/contacts/' + $json.contact_id }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $json.properties }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHubspot000001",
+          "name": "HubSpot Private App"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "48409f35-828c-5632-bc3b-65bcf4780ddf",
+      "name": "Create contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.HUBSPOT_API_BASE || 'https://api.hubapi.com') + '/crm/v3/objects/contacts' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $json.properties }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHubspot000001",
+          "name": "HubSpot Private App"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "6d97c8ec-dfb4-594a-9b15-d34ee6a092e5",
+      "name": "Contact ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { contact_id: $json.id, company_id: $('Company ID').first().json.company_id, owner_conflict: $('Plan contact upsert').first().json.owner_conflict } }];"
+      }
+    },
+    {
+      "id": "b3e8aafd-13f4-5d7d-b878-493f7455df6f",
+      "name": "Associate company?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3120,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6abe5f50-feaf-579a-960e-339afa3bc607",
+              "leftValue": "={{ Boolean($json.company_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "1dd45598-05b5-5047-b1da-ed7c506a8cc8",
+      "name": "Associate contact to company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3360,
+        0
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ ($env.HUBSPOT_API_BASE || 'https://api.hubapi.com') + '/crm/v4/objects/contact/' + $json.contact_id + '/associations/default/company/' + $json.company_id }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHubspot000001",
+          "name": "HubSpot Private App"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "7ac003b6-dc85-5fb8-9cfd-5ef0de6a6b87",
+      "name": "Add research note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3600,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.HUBSPOT_API_BASE || 'https://api.hubapi.com') + '/crm/v3/objects/notes' }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { hs_timestamp: new Date().toISOString(), hs_note_body: '<b>SDR Agent research</b><br>' + String($('Load lead').first().json.research_summary || 'No research').replace(/\\n/g, '<br>') + '<br><br><b>Talking points</b><br>' + String($('Load lead').first().json.talking_points || '-').replace(/\\n/g, '<br>') }, associations: [{ to: { id: $('Contact ID').first().json.contact_id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 202 }] }] }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrHubspot000001",
+          "name": "HubSpot Private App"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "77975287-a674-5cf1-a6ad-acef8ffd2d98",
+      "name": "Save HubSpot IDs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3840,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set hubspot_contact_id = $2, hubspot_company_id = $3, status = 'in_crm' where id = $1::uuid returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Load lead').first().json.id, $('Contact ID').first().json.contact_id ?? null, $('Contact ID').first().json.company_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "c200bb71-48b4-5c17-8b93-dc42523b42c4",
+      "name": "Owner conflict?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4080,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "31a55377-626b-577c-b5de-8e4515e5ebad",
+              "leftValue": "={{ $('Contact ID').first().json.owner_conflict === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "cfc731a5-5ca2-5bfe-9c31-570d5f704c5c",
+      "name": "Warn owner conflict",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        4080,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ 'chat.postMessage' }}",
+            "payload": "={{ ({ channel: $('Load lead').first().json.slack_channel_id, thread_ts: $('Load lead').first().json.slack_thread_ts, text: ':warning: This contact already has a different HubSpot owner. Owner was not changed; check with your manager.' }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "74c42dfb-29f8-51df-8174-ed0e42563400",
+      "name": "Report error",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        4320,
+        400
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubReportErr1",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "workflow": "={{ 'SDR · sub · HubSpot company + contact sync' }}",
+            "step": "={{ $prevNode.name }}",
+            "lead_id": "={{ $('Load lead').first().json.id }}",
+            "error": "={{ JSON.stringify($json.error ?? $json).slice(0, 2000) }}",
+            "mark_lead": "={{ true }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "workflow",
+              "displayName": "workflow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "mark_lead",
+              "displayName": "mark_lead",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Load lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load lead": {
+      "main": [
+        [
+          {
+            "node": "Search company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search company": {
+      "main": [
+        [
+          {
+            "node": "Company found?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Company found?": {
+      "main": [
+        [
+          {
+            "node": "Company ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Has company data?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has company data?": {
+      "main": [
+        [
+          {
+            "node": "Create company",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Company ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create company": {
+      "main": [
+        [
+          {
+            "node": "Company ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Company ID": {
+      "main": [
+        [
+          {
+            "node": "Search contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search contact": {
+      "main": [
+        [
+          {
+            "node": "Plan contact upsert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan contact upsert": {
+      "main": [
+        [
+          {
+            "node": "Contact exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact exists?": {
+      "main": [
+        [
+          {
+            "node": "Update contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update contact": {
+      "main": [
+        [
+          {
+            "node": "Contact ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create contact": {
+      "main": [
+        [
+          {
+            "node": "Contact ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact ID": {
+      "main": [
+        [
+          {
+            "node": "Owner conflict?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Associate company?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Owner conflict?": {
+      "main": [
+        [
+          {
+            "node": "Warn owner conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Associate company?": {
+      "main": [
+        [
+          {
+            "node": "Associate contact to company",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Add research note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Associate contact to company": {
+      "main": [
+        [
+          {
+            "node": "Add research note",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add research note": {
+      "main": [
+        [
+          {
+            "node": "Save HubSpot IDs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,172 @@
+{
+  "id": "sdrSubDraft00001",
+  "name": "SDR · sub · AI draft LinkedIn message",
+  "active": false,
+  "nodes": [
+    {
+      "id": "3f1c4149-9825-525c-8db9-92d9bc1f740a",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "lead_id",
+              "type": "any"
+            },
+            {
+              "name": "notes",
+              "type": "any"
+            },
+            {
+              "name": "goal",
+              "type": "any"
+            },
+            {
+              "name": "sdr_name",
+              "type": "any"
+            },
+            {
+              "name": "previous_draft",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "53073ed1-d4c9-56b5-9806-3559dd9b79db",
+      "name": "Load lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select * from leads where id = $1::uuid",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "94da5705-e2e1-576c-9bef-38adf0e2fbac",
+      "name": "Draft message",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a LinkedIn message from {{ $('Called by parent').first().json.sdr_name || 'the SDR' }} to {{ $json.first_name || $json.full_name }}, {{ $json.title }} at {{ $json.company_name }}. They just spoke on the phone.\n\nCall notes: {{ $('Called by parent').first().json.notes || '(no notes)' }}\nGoal of this message: {{ String($('Called by parent').first().json.goal || 'soft_follow_up').replace(/_/g, ' ') }}\n\nBackground (use only if it supports something said on the call):\n{{ $json.research_summary || 'none' }}\n\nRules:\n- Under 300 characters, so it also fits a connection-request note\n- Reference one specific thing they said on the call\n- One clear next step, no hard pitch\n- Plain, human tone; no emojis, no \"I hope this finds you well\"\n- Never invent facts that are not in the notes\n{{ $('Called by parent').first().json.previous_draft ? '- Write a clearly different message from this previous draft: ' + $('Called by parent').first().json.previous_draft : '' }}\nReturn only the message text.",
+        "options": {}
+      }
+    },
+    {
+      "id": "7fc72317-ff02-5b75-ae76-140a3311dc53",
+      "name": "LLM",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        220
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.LLM_MODEL || 'gpt-5-mini' }}"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "sdrOpenAi0000001",
+          "name": "LLM (OpenAI-compatible)"
+        }
+      }
+    },
+    {
+      "id": "6280fa6a-c0f9-5abc-841e-f8fb7bd2d1e8",
+      "name": "Clean draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Clean the LLM output: strip wrapping quotes/fences and whitespace. Never truncate silently;\n// the draft card warns when it is over the LinkedIn note limit.\nconst input = $('Called by parent').first().json;\nconst raw = String($input.first().json.text || '').trim();\nconst draft = raw.replace(/^```[a-z]*\\n?|```$/g, '').trim().replace(/^[\"“](.*)[\"”]$/s, '$1').trim();\nif (!draft) throw new Error('LLM returned an empty draft');\nreturn [{ json: { lead_id: input.lead_id, draft } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Load lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load lead": {
+      "main": [
+        [
+          {
+            "node": "Draft message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft message": {
+      "main": [
+        [
+          {
+            "node": "Clean draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Draft message",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,300 @@
+{
+  "id": "sdrWf5Expansion1",
+  "name": "SDR · WF5 Expansion results (expansion callback)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "7f242953-3ad0-58c4-87ec-d909eb9e326b",
+      "name": "Expansion callback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sdr-expansion",
+        "responseMode": "responseNode",
+        "options": {},
+        "authentication": "headerAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrClayCb0000001",
+          "name": "Clay Callback Secret"
+        }
+      },
+      "webhookId": "sdr-expansion"
+    },
+    {
+      "id": "a41b1086-a383-58f4-b862-363ae68feeb8",
+      "name": "Ack 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "e939d816-0b73-5f94-9230-da6a2352f965",
+      "name": "Normalize callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// The expansion sub (or Clay Table 2) sends two kinds of callbacks to WF5:\n//   { type: \"expected_total\", run_id, expected_total }      (parent row, once)\n//   { type: \"person\", run_id, linkedin_url, ... }           (child rows, one per person)\nconst UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nconst b = $input.first().json.body || {};\n\nconst str = (v) => (v === undefined || v === null || String(v).trim() === '' ? null : String(v).trim());\nconst int = (v) => {\n  const n = parseInt(String(v ?? '').replace(/[^0-9-]/g, ''), 10);\n  return Number.isFinite(n) ? n : null;\n};\n\nif (!UUID.test(String(b.run_id || ''))) {\n  throw new Error(`Expansion callback without a valid run_id: ${JSON.stringify(b).slice(0, 300)}`);\n}\n\nconst isTotal = String(b.type || '').toLowerCase() === 'expected_total' ||\n  (b.expected_total !== undefined && !b.linkedin_url);\n\nif (isTotal) {\n  return [{ json: { kind: 'total', run_id: b.run_id, expected_total: Math.max(0, int(b.expected_total) ?? 0) } }];\n}\n\nconst match = String(b.linkedin_url || '').match(/linkedin\\.com\\/(?:mwlite\\/)?in\\/([^\\/?#\\s]+)/i);\nlet slug = null;\nif (match) {\n  try { slug = decodeURIComponent(match[1]); } catch (e) { slug = match[1]; }\n  // Vanity slugs are case-insensitive; LinkedIn member IDs (ACw...) are not\n  if (!/^ACw/.test(slug)) slug = slug.toLowerCase();\n}\n\n// AI fit column may return {\"score\":4,\"reason\":\"...\"} or separate fields\nlet fit = b.fit;\nif (typeof fit === 'string') { try { fit = JSON.parse(fit); } catch (e) { fit = null; } }\nfit = fit || {};\n\nconst firstName = str(b.first_name);\nconst lastName = str(b.last_name);\n\nreturn [{ json: {\n  kind: 'person',\n  run_id: b.run_id,\n  linkedin_url: slug ? `https://www.linkedin.com/in/${slug}` : null,\n  first_name: firstName,\n  last_name: lastName,\n  full_name: str(b.full_name) || [firstName, lastName].filter(Boolean).join(' ') || null,\n  title: str(b.title),\n  headline: str(b.headline),\n  location: str(b.location),\n  linkedin_followers: int(b.linkedin_followers),\n  linkedin_connections: int(b.linkedin_connections),\n  work_email: str(b.work_email) ? str(b.work_email).toLowerCase() : null,\n  email_status: str(b.work_email) ? ((str(b.email_status) || 'unknown').toLowerCase()) : 'not_found',\n  fit_score: int(fit.score ?? b.fit_score),\n  fit_reason: str(fit.reason ?? b.fit_reason),\n  enrichment: b,\n} }];\n"
+      }
+    },
+    {
+      "id": "f29ccb61-4a76-581a-9eac-e413af1243c7",
+      "name": "Expected total?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7ca9e8c5-b68d-532a-947a-981448488b18",
+              "leftValue": "={{ $json.kind === 'total' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "d71c4b68-37b6-53a1-9eb3-fe703a5cf1fb",
+      "name": "Save expected total",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate expansion_runs set expected_total = $2::int where id = $1::uuid returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$json.run_id, $json.expected_total ?? 0] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "a650b6f6-162c-542b-b4d2-acd0a4547735",
+      "name": "Store suggested colleague",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        250
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with run as (\n  update expansion_runs set received_count = received_count + 1 where id = $1::uuid returning *\n),\np as (select l.* from leads l join run on l.id = run.lead_id),\nins as (\n  insert into leads (linkedin_url, first_name, last_name, full_name, title, headline, location,\n                     linkedin_followers, linkedin_connections, work_email, email_status, fit_score, fit_reason,\n                     enrichment, company_name, company_domain, company_linkedin_url,\n                     source, parent_lead_id, expansion_run_id, status, sdr_slack_id, slack_channel_id, slack_thread_ts)\n  select $2, $3, $4, $5, $6, $7, $8, $9::int, $10::int, $11, $12, $13::int, $14, $15::jsonb,\n         p.company_name, p.company_domain, p.company_linkedin_url,\n         'account_expansion', p.id, $1::uuid, 'suggested', p.sdr_slack_id, p.slack_channel_id, p.slack_thread_ts\n  from p where $2 is not null and $2 <> p.linkedin_url\n  on conflict (linkedin_url) do nothing\n  returning id\n)\nselect run.*, (select count(*) from ins) as inserted from run",
+        "options": {
+          "queryReplacement": "={{ [$json.run_id, $json.linkedin_url ?? null, $json.first_name ?? null, $json.last_name ?? null, $json.full_name ?? null, $json.title ?? null, $json.headline ?? null, $json.location ?? null, $json.linkedin_followers ?? null, $json.linkedin_connections ?? null, $json.work_email ?? null, $json.email_status ?? null, $json.fit_score ?? null, $json.fit_reason ?? null, JSON.stringify($json.enrichment)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "f3843ae6-c697-59c1-83f5-293311d9cd22",
+      "name": "All arrived?",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1200,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate expansion_runs set status = 'posting' where id = $1::uuid and status = 'searching' and expected_total is not null and received_count >= expected_total returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$json.id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "1b55436e-e74e-50e2-a762-0afcc2327178",
+      "name": "Post expansion card (sub)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1440,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubExpCard001",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Expansion callback": {
+      "main": [
+        [
+          {
+            "node": "Ack 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack 200": {
+      "main": [
+        [
+          {
+            "node": "Normalize callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize callback": {
+      "main": [
+        [
+          {
+            "node": "Expected total?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expected total?": {
+      "main": [
+        [
+          {
+            "node": "Save expected total",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store suggested colleague",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save expected total": {
+      "main": [
+        [
+          {
+            "node": "All arrived?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store suggested colleague": {
+      "main": [
+        [
+          {
+            "node": "All arrived?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All arrived?": {
+      "main": [
+        [
+          {
+            "node": "Post expansion card (sub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}

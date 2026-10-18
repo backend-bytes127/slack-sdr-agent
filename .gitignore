@@ -1,0 +1,8 @@
+.env
+secrets.local.md
+.build/
+*.real
+.env.mock
+.DS_Store
+supabase/.temp/
+__pycache__/

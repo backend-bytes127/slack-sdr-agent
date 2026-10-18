@@ -1,0 +1,104 @@
+{
+  "id": "sdrSubSlackApi01",
+  "name": "SDR · sub · Slack API",
+  "active": false,
+  "nodes": [
+    {
+      "id": "411de848-82d6-5964-a39a-e8f684733a04",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "method",
+              "type": "any"
+            },
+            {
+              "name": "payload",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "afad67aa-451d-5e50-9686-25bb885742e9",
+      "name": "Call Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.SLACK_API_BASE || 'https://slack.com/api') + '/' + $json.method }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sdrSlackBot00001",
+          "name": "Slack Bot (Bearer)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "3f2499da-8fc8-5bcd-9b2f-111ab0f45513",
+      "name": "Check ok",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Slack returns HTTP 200 with ok:false on errors, so fail loudly here.\nconst res = $input.first().json;\nconst input = $('Called by parent').first().json;\nif (!res.ok) {\n  const detail = res.response_metadata && res.response_metadata.messages\n    ? ` (${res.response_metadata.messages.join('; ')})` : '';\n  throw new Error(`Slack ${input.method} failed: ${res.error}${detail}`);\n}\nreturn [{ json: res }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Call Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Slack": {
+      "main": [
+        [
+          {
+            "node": "Check ok",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {}
+}

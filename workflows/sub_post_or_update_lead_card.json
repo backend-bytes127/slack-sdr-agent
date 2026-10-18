@@ -1,0 +1,202 @@
+{
+  "id": "sdrSubLeadCard01",
+  "name": "SDR · sub · Post or update lead card",
+  "active": false,
+  "nodes": [
+    {
+      "id": "0f1b3519-9301-56dc-b263-e2742ebe3090",
+      "name": "Called by parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "lead_id",
+              "type": "any"
+            },
+            {
+              "name": "mode",
+              "type": "any"
+            },
+            {
+              "name": "note",
+              "type": "any"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "904c6d94-782c-5766-83be-645538b4b696",
+      "name": "Load lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select * from leads where id = $1::uuid",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    },
+    {
+      "id": "73d270b9-f24d-5745-911b-ce28719994bc",
+      "name": "Build lead card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Build the Block Kit lead card from the lead row. Buttons show only while the lead is\n// waiting for a call; afterwards the `note` (or the status) replaces them.\nconst input = $('Called by parent').first().json;\nconst lead = $input.first().json;\nconst note = input.note || '';\n\nconst show = (v, fallback = '—') => (v === null || v === undefined || v === '' ? fallback : String(v));\nconst num = (v) => (v === null || v === undefined ? '—' : Number(v).toLocaleString('en-US'));\nconst cut = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s);\n\nconst emailLine = lead.work_email ? `${lead.work_email} (${show(lead.email_status, 'unknown')})` : 'No email found';\nconst phoneLine = lead.phone ? `${lead.phone}${lead.phone_type ? ` (${lead.phone_type})` : ''}` : 'No phone found, start on LinkedIn';\nconst portal = $env.HUBSPOT_PORTAL_ID;\nconst hubspotUrl = lead.hubspot_contact_id && portal\n  ? `https://app.hubspot.com/contacts/${portal}/record/0-1/${lead.hubspot_contact_id}` : null;\n\nconst links = [`<${lead.linkedin_url}|LinkedIn>`];\nif (hubspotUrl) links.push(`<${hubspotUrl}|HubSpot>`);\nif (lead.source === 'account_expansion') links.push('_Suggested colleague_');\n\nconst blocks = [\n  { type: 'header', text: { type: 'plain_text', text: cut(show(lead.full_name, 'Unknown name'), 150) } },\n  { type: 'section', text: { type: 'mrkdwn', text: cut(`*${show(lead.title, 'Title unknown')}* at *${show(lead.company_name, 'company unknown')}*\\n${show(lead.headline, '')}`, 2900) } },\n  { type: 'section', fields: [\n    { type: 'mrkdwn', text: `*Email*\\n${emailLine}` },\n    { type: 'mrkdwn', text: `*Phone*\\n${phoneLine}` },\n    { type: 'mrkdwn', text: `*Followers / Connections*\\n${num(lead.linkedin_followers)} / ${num(lead.linkedin_connections)}` },\n    { type: 'mrkdwn', text: `*Location*\\n${show(lead.location)}` },\n    { type: 'mrkdwn', text: `*Company*\\n${show(lead.company_size)} · ${show(lead.industry)}` },\n    { type: 'mrkdwn', text: `*ICP fit*\\n${show(lead.icp_fit)}` },\n  ] },\n  { type: 'section', text: { type: 'mrkdwn', text: cut(`*Research*\\n${show(lead.research_summary, '_No research returned_')}`, 2900) } },\n  { type: 'section', text: { type: 'mrkdwn', text: cut(`*Talking points*\\n${show(lead.talking_points, '_None_')}`, 2900) } },\n  { type: 'context', elements: [{ type: 'mrkdwn', text: `${links.join('  ·  ')}  ·  status: \\`${lead.status}\\`` }] },\n];\n\nconst awaitingCall = ['in_crm', 'enriched'].includes(lead.status) && !note;\nif (awaitingCall) {\n  blocks.push({ type: 'actions', elements: [\n    { type: 'button', action_id: 'call_connected', style: 'primary', text: { type: 'plain_text', text: 'Picked up' }, value: lead.id },\n    { type: 'button', action_id: 'call_no_answer', text: { type: 'plain_text', text: 'No answer' }, value: lead.id },\n    { type: 'button', action_id: 'wrong_person', style: 'danger', text: { type: 'plain_text', text: 'Wrong person' }, value: lead.id },\n  ] });\n} else if (note) {\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: cut(note, 2900) } });\n}\n\nconst useUpdate = input.mode === 'update' && lead.card_message_ts;\nconst payload = {\n  channel: lead.slack_channel_id,\n  text: `Lead card: ${show(lead.full_name, lead.linkedin_url)}`,\n  blocks,\n  unfurl_links: false,\n};\nif (useUpdate) payload.ts = lead.card_message_ts;\nelse payload.thread_ts = lead.slack_thread_ts;\n\nreturn [{ json: { lead_id: lead.id, method: useUpdate ? 'chat.update' : 'chat.postMessage', payload } }];\n"
+      }
+    },
+    {
+      "id": "68f30ec4-9791-5a5c-8ae5-a55b07d217b4",
+      "name": "Send card",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sdrSubSlackApi01",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "method": "={{ $json.method }}",
+            "payload": "={{ $json.payload }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "method",
+              "displayName": "method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "any",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0ac7ec29-23cf-50c6-8524-bb7d93dd8042",
+      "name": "Save card ts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with _r as (\nupdate leads set card_message_ts = coalesce($2, card_message_ts) where id = $1::uuid returning *\n) select * from _r",
+        "options": {
+          "queryReplacement": "={{ [$('Build lead card').first().json.lead_id, $json.ts ?? null] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "sdrPostgres00001",
+          "name": "SDR Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Called by parent": {
+      "main": [
+        [
+          {
+            "node": "Load lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load lead": {
+      "main": [
+        [
+          {
+            "node": "Build lead card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build lead card": {
+      "main": [
+        [
+          {
+            "node": "Send card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send card": {
+      "main": [
+        [
+          {
+            "node": "Save card ts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "sdrWf4Errors0001"
+  },
+  "pinData": {}
+}
